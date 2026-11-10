@@ -172,16 +172,19 @@ function validateRecipients(state, event, { localPresence = true } = {}) {
   // explicitly addressed people. Identity and remote-access checks stay in code.
 }
 function observe(state, proposal, source = 'perception', authorization = {}) {
+  // Presentation is authored by the validated perception result, never by an
+  // event proposal (including proposals that bypass narrator display editing).
+  proposal={...proposal};delete proposal.playerPresentation;
   validateRecipients(state, proposal);
   const sourceAuthority = { ...authorization, characterId: proposal.characterId };
   assertObservable(state, proposal.text, sourceAuthority);
   assertObservable(state, source, sourceAuthority);
   const location = proposal.location || (proposal.characterId ? character(state, proposal.characterId).location : state.location);
-  const semantic=runtimes.get(state)?.semantics;
+  const runtime=runtimes.get(state),semantic=runtime?.semantics;
   if(semantic&&(proposal.channel||'local')==='local'){
     const entry=log(state,{...proposal,type:'observation',location,intendedRecipients:proposal.recipients||[],recipients:proposal.characterId?[proposal.characterId]:[],localBroadcast:!proposal.recipients?.length,...(authorization.authored?{authored:true}:{})});
     if(proposal.characterId)remember(state,proposal.characterId,proposal.text,source,entry.id);
-    semantic.queue(entry);return entry;
+    semantic.queue(entry,runtime.narrationPresentation);return entry;
   }
   // Models commonly use [] for an optional local audience. Treat it the same
   // as omission; an explicit nonempty list still preserves private delivery.
@@ -622,6 +625,10 @@ async function advanceClock(env,state,target,output,display){
 }
 
 async function enactPlan(env, state, plan, output, { display = true } = {}) {
+  const outputStart=output.length;
+  // Only already displayed narrator prose from this moment is eligible context.
+  // Raw observations and other observers' knowledge never enter this list.
+  const alreadyShown=()=>output.slice(outputStart).filter(m=>m.role==='narrator'&&m.storyTime===state.time).map(m=>m.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim()).filter(Boolean);
   for (let event of plan.events) {
     aborted(env.signal);
     if (event.at !== undefined && event.at > state.time) await advanceClock(env,state,event.at,output,display);
@@ -633,20 +640,28 @@ async function enactPlan(env, state, plan, output, { display = true } = {}) {
       log(state,{type:'time',minutes:event.minutes,label:state.timeLabel});
       continue;
     }
-    applyEvent(state, event, env);
+    // Character speech, remote messages and explicit timed boundaries retain
+    // their own passages. Only untimed environmental narration has display prose
+    // separate from its complete per-observer deliveries.
+    env.narrationPresentation=display&&event.type==='observation'&&!event.characterId&&event.at===undefined&&(event.channel||'local')==='local'?{alreadyShown:alreadyShown()}:undefined;
+    try{applyEvent(state, event, env);}finally{env.narrationPresentation=undefined;}
     await syncVisuals(state,env,{sources:visualEventSources(state.events.slice(eventStart))});
     await env.semantics.flush();
     // Each visible event is its own boundary; a later arrival never changes an
     // earlier message's snapshot. Editorial narration itself teaches nobody.
     const perceived=state.events.slice(eventStart).filter(e=>e.type==='observation').flatMap(e=>(e.perceptions??((e.channel||'local')!=='local'&&e.recipients.includes('player')?[{characterId:'player',text:e.text}]:[])).filter(p=>p.characterId==='player').map(p=>({event:e,delivery:p})));
-    if(display&&!['background','publication','invitation','activity'].includes(event.type))for(const {event:source,delivery} of perceived)output.push(message(state,'narrator',delivery.text,undefined,{sourceEventId:source.id}));
+    if(display&&!['background','publication','invitation','activity'].includes(event.type))for(const {event:source,delivery} of perceived){
+      const text=source.playerPresentation?.text??delivery.text;
+      if(text.trim())output.push(message(state,'narrator',text,undefined,{sourceEventId:source.id,...(source.playerPresentation?{narrationPresentation:{excerpts:source.playerPresentation.excerpts}}:{})}));
+    }
     env.flushDescriptions();
   }
   if (plan.text?.trim()) {
     const visualText=plan.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim();
     await syncVisuals(state,env,{sources:visualText?[{id:`narration:${id()}`,kind:'narration',text:visualText,time:state.time}]:[]});
-    env.semantics.survey();await env.semantics.flush();
-    if(display)output.push(message(state, 'narrator', plan.text));
+    const survey=env.semantics.survey(display?{candidate:plan.text,alreadyShown:alreadyShown()}:undefined);await env.semantics.flush();
+    const text=survey.presentationResult?.text??plan.text;
+    if(display&&text.trim())output.push(message(state, 'narrator', text,undefined,survey.presentationResult?{narrationPresentation:{excerpts:survey.presentationResult.excerpts}}:{}));
     env.flushDescriptions();
   }
 }
@@ -789,7 +804,7 @@ export async function runTurn(options) {
   // A silent/off-scene decision still changes the world. Give that state a new
   // narrative checkpoint rather than mutating an earlier message's snapshot.
   if (!output.length || JSON.stringify(output.at(-1).snapshot) !== JSON.stringify(state)) {
-    const closing = await generate(env, 'Closing the moment', `Return {"text":"a brief player-visible pause, surroundings or editorial response appropriate to the current moment"}. Do not invent dialogue, actions, visible cues from thoughts, new facts, or private disclosures. This is a checkpoint for already resolved events, not an extra development.`, { world: state, history: narratorHistory([...history, ...output],state) }, result => string(result.text, 'closing narration'));
+    const closing = await generate(env, 'Closing the moment', `Return {"text":"a brief player-visible pause or editorial response appropriate to the current moment"}. Do not retell or paraphrase environment, actions or dialogue already in alreadyPresented. If only internal state changed, use a minimal natural editorial pause. Do not invent dialogue, actions, elapsed time, visible cues from thoughts, new facts, or private disclosures. This is a checkpoint for already resolved events, not an extra development.`, { world: state, history: narratorHistory([...history, ...output],state),alreadyPresented:output.filter(m=>m.storyTime===state.time&&m.role!=='player').map(m=>({role:m.role,text:m.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim()})) }, result => string(result.text, 'closing narration'));
     output.push(message(state, 'narrator', closing.text));
   }
   aborted(env.signal);
