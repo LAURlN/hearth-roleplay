@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import {syncVisuals,refreshVisualWitnesses,visualContext,visualEventSources,correctVisuals} from './visuals.mjs';
+import {CHARACTER_PROMPT} from './settings.mjs';
 
 // All mutable values crossing this module's boundary are copied. The caller owns
 // persistence and commits only a successfully completed turn.
@@ -41,11 +42,12 @@ export function parseJson(text) {
 }
 
 class RefusalError extends Error {}
-async function generate(env, stage, instruction, payload, validate, { helper = false } = {}) {
+async function generate(env, stage, instruction, payload, validate, { helper = false, actor } = {}) {
   aborted(env.signal);
   env.onStage?.(stage);
+  const actingRules=actor?`Shared character system prompt:\n${env.settings.characterPrompt??CHARACTER_PROMPT}\n\n${actor.systemPrompt?.trim()?`Character-specific system prompt:\n${actor.systemPrompt}\n\n`:''}`:'';
   const requests = [
-    { role: 'system', content: `${env.settings.roleplayPrompt || 'Tell a coherent roleplay story with independent character agency.'}\n\n${instruction}\nRecipient convention: ordinary observable LOCAL speech/actions omit recipients or use []; both mean all people at that location. A nonempty list intentionally restricts who can perceive it (for example, a whisper). Remote phone/online messages require explicit nonempty recipients. Thoughts/OOC remain private regardless of recipient fields. Put actual spoken replies in text; an empty text field means deliberately saying/doing nothing observable.\nReturn ONLY a JSON object. No Markdown, commentary, or response_format dependency. If you must refuse, return {"refusal":"reason"}.` },
+    { role: 'system', content: `${env.settings.roleplayPrompt || 'Tell a coherent roleplay story with independent character agency.'}\n\n${actingRules}${instruction}\nRecipient convention: ordinary observable LOCAL speech/actions omit recipients or use []; both mean all people at that location. A nonempty list intentionally restricts who can perceive it (for example, a whisper). Remote phone/online messages require explicit nonempty recipients. Thoughts/OOC remain private regardless of recipient fields. Put actual spoken replies in text; an empty text field means deliberately saying/doing nothing observable.\nReturn ONLY a JSON object. No Markdown, commentary, or response_format dependency. If you must refuse, return {"refusal":"reason"}.` },
     { role: 'user', content: JSON.stringify(payload) },
   ];
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -72,7 +74,7 @@ function online(value = {}) {
   return { access: value.access === true, interests: Array.isArray(value.interests) ? [...new Set(value.interests.filter(x => typeof x === 'string'))].sort() : [], connections: Array.isArray(value.connections) ? [...new Set(value.connections.filter(x => typeof x === 'string'))].sort() : [] };
 }
 function makeCharacter(value, characterId, location) {
-  return { id: characterId, name: String(value.name || 'Stranger'), description: String(value.description || ''), appearance: String(value.appearance || ''), personality: String(value.personality || ''), goals: String(value.goals || ''), location: String(value.location || location), knowledge: [], privateState: '', online: online(value.online) };
+  return { id: characterId, name: String(value.name || 'Stranger'), description: String(value.description || ''), appearance: String(value.appearance || ''), personality: String(value.personality || ''), systemPrompt:String(value.systemPrompt || ''), goals: String(value.goals || ''), location: String(value.location || location), knowledge: [], privateState: '', online: online(value.online) };
 }
 
 export function createInitialState(setup = {}) {
@@ -226,7 +228,7 @@ function validateEvent(state, event, { authoredCharacterId } = {}) {
       for (const who of state.characters) if (who.privateState?.length > 3) check(!event.text.includes(who.privateState), 'Shared background cannot contain a character private state.');
       break;
     case 'establish':
-      check(state.time === 0 && state.events.every(e=>['visual_change','appearance_observation','visual_access','visual_correction'].includes(e.type)) && state.location === 'Opening location', 'The opening setting is already established.');
+      check(state.time === 0 && state.events.every(e=>['visual_change','appearance_observation','visual_access','visual_correction','character_prompt'].includes(e.type)) && state.location === 'Opening location', 'The opening setting is already established.');
       string(event.location, 'opening location');
       if (event.label !== undefined) { string(event.label, 'opening time label'); assertObservable(state, event.label); }
       break;
@@ -512,7 +514,7 @@ For a real newcomer use continuity:null and memories:[]; they did not hear earli
       return {text:memory.excerpt,source:`Recovered ${source.kind}${source.speaker?` from ${source.speaker}`:''}: ${source.id}`,time:source.time,...(source.eventId?{eventId:source.eventId}:{}),sourceId:source.id,identityEvidence:clone(result.continuity)};
     });
   }, {helper:true});
-  return { ...event, character: result.character, knowledge: result.knowledge || [], continuity:result.continuity || null, curatedMemories, reconciled: true };
+  return { ...event, character: {...result.character,systemPrompt:''}, knowledge: result.knowledge || [], continuity:result.continuity || null, curatedMemories, reconciled: true };
 }
 
 async function enactPlan(env, state, plan, output, { display = true } = {}) {
@@ -597,6 +599,16 @@ export async function applyVisualCorrection(options) {
   return {state:clone(state),messages:[corrected]};
 }
 
+export function applyCharacterPrompt({state:original,characterId,systemPrompt}) {
+  const state=clone(original),who=character(state,characterId);
+  check(characterId!=='player','The player has no AI character system prompt.');
+  who.systemPrompt=string(systemPrompt,'character system prompt',true);
+  // The prompt is instructions for its own actor only, never an observation or
+  // transcript passage teaching its text to anybody else.
+  log(state,{type:'character_prompt',characterId});
+  return {state:clone(state),messages:[message(state,'narrator',`Character instructions updated for ${who.name}.`)]};
+}
+
 export async function runTurn(options) {
   const state = clone(options.state);
   const history = clone(options.messages || []);
@@ -621,7 +633,7 @@ export async function runTurn(options) {
   for (const speakerId of (plan.speakers || []).slice(0, max)) {
     aborted(env.signal);
     const who = character(state, speakerId);
-    const response = await generate(env, `${who.name} is responding`, `You play ONLY the supplied character. Your entire permitted perspective is in context; do not assume you know anything from narrator/global history or other people's private thoughts. Nearby people are physically present, not necessarily speaking. Record IDs/names are orchestration labels, not proof you learned someone's name. Nearby appearance is the current perceptible view; rememberedAppearances may be outdated. An empty view means unknown or unavailable, not that the person has no clothes or features. Use only your own observations/background; distinguish claims from truth. Decide your own speech, silence, thoughts and voluntary movement. Never control the player or another character. Return {"text":"ONLY your observable speech/actions, empty for silence; no private reasoning or narrator prose","privateState":"updated own internal state, not displayed","channel":"local|phone|online","recipients":["optional exact known IDs; remote speech must include player"],"movement":null|{"destination":"place","reason":"your OWN intention","when":"before|after"}}. Do not narrate successful movement in text until narrator resolution. An absent person cannot speak in the current player scene without moving there first or an established remote channel. Remote communication requires explicit recipients. Choosing not to accept an invitation is valid.`, { context: characterContext(state, who.id) }, result => validateActor(state, who, result));
+    const response = await generate(env, `${who.name} is responding`, `You play ONLY the supplied character. Your entire permitted perspective is in context; do not assume you know anything from narrator/global history or other people's private thoughts. Nearby people are physically present, not necessarily speaking. Record IDs/names are orchestration labels, not proof you learned someone's name. Nearby appearance is the current perceptible view; rememberedAppearances may be outdated. An empty view means unknown or unavailable, not that the person has no clothes or features. Use only your own observations/background; distinguish claims from truth. Decide your own speech, silence, thoughts and voluntary movement. Never control the player or another character. Return {"text":"ONLY your observable speech/actions, empty for silence; no private reasoning or narrator prose","privateState":"updated own internal state, not displayed","channel":"local|phone|online","recipients":["optional exact known IDs; remote speech must include player"],"movement":null|{"destination":"place","reason":"your OWN intention","when":"before|after"}}. Do not narrate successful movement in text until narrator resolution. An absent person cannot speak in the current player scene without moving there first or an established remote channel. Remote communication requires explicit recipients. Choosing not to accept an invitation is valid.`, { context: characterContext(state, who.id) }, result => validateActor(state, who, result),{actor:who});
     who.privateState = response.privateState;
     let movementAllowed = true;
     if (response.movement?.when === 'before') movementAllowed = await resolveMovement(env, state, who, response.movement, output);

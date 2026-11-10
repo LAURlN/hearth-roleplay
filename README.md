@@ -57,7 +57,11 @@ Open Settings and check the connection. The defaults are `http://127.0.0.1:10531
 
 Enter a premise, a player persona, and optionally a few predefined characters. Setups can be saved and reused. The narrator establishes the opening and introduces other characters as the story develops.
 
-The general roleplay prompt and illustrator prompt are separate editable settings. Prompt changes apply to future requests. There are no combat stats, rewards, equipment generators, or player-managed scene modes.
+Settings has separate general roleplay, shared character and illustrator system prompts. The general rules apply to narration, character replies, input interpretation, appearance maintenance and the new-character curator. Shared character rules apply to actor replies only. Prompt changes in Settings apply to future requests. There are no combat stats, rewards, equipment generators, or player-managed scene modes.
+
+Each AI character can also have an individual system prompt for voice, habits and portrayal. Set it in the optional cast setup, or open **World & knowledge → Presence → Character system prompt** to edit an existing/generated character. Actor requests combine general roleplay rules, shared character rules, that actor's individual instructions, and the engine's response/knowledge protocol. Individual prompts stay out of other actors' contexts and backstage world projections, and do not automatically add observations or knowledge. Leaving an individual prompt blank uses the shared rules alone. The player is never an AI actor.
+
+Saving individual instructions for an existing character creates a new branch and checkpoint without an AI request; earlier prompts and continuations stay in their previous branch. Rewind/switch restores individual prompts with the character state. Shared Settings prompts remain global. Export/import and saved setups preserve individual prompts. Newly generated characters inherit the shared prompt with an empty individual addition; the narrator/helper cannot install model-authored system instructions. Characters are stored in the story's JSON snapshots, without separate per-character files.
 
 Each library entry has a **···** menu to rename, archive/restore or delete it without opening the conversation. Switch between Library and Archived to find saved stories. Archiving retains the conversation and branches. Renaming/archive status applies to the library entry independently of fictional rewind; deleting removes the story and its debug log after confirmation.
 

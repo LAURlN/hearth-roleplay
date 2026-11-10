@@ -1,4 +1,4 @@
-import { createInitialState, runTurn, applyAuthoredMessage,applyVisualCorrection } from './engine.mjs';
+import { createInitialState, runTurn, applyAuthoredMessage,applyVisualCorrection,applyCharacterPrompt } from './engine.mjs';
 import {validateVisualFacts} from './visuals.mjs';
 import { makeId, clone, branchWorld, publicStory } from './store.mjs';
 import { createProvider } from './provider.mjs';
@@ -17,6 +17,7 @@ export function validateSetup(input) {
   for(const item of input.characters??[]) {
     const character={name:text(item.name,'character name',120)};
     for(const key of ['description','appearance','personality','goals','location']) character[key]=text(item[key]??'',key,20000,true);
+    character.systemPrompt=text(item.systemPrompt??'','character system prompt',60000,true);
     if(item.online) character.online={access:item.online.access===true,interests:Array.isArray(item.online.interests)?item.online.interests.filter(x=>typeof x==='string').slice(0,100):[],connections:Array.isArray(item.online.connections)?item.online.connections.filter(x=>typeof x==='string').slice(0,100):[]};
     setup.characters.push(character);
   }
@@ -154,6 +155,18 @@ export class StoryService {
       story.activeBranchId=newId;story.illustrationJob={status:'cancelled'};
     },{interruptImages:true,illustrate:false});
   }
+  async characterPrompt(id,input) {
+    text(input.characterId,'character identity',100);text(input.systemPrompt,'character system prompt',60000,true);
+    if(input.characterId==='player')throw failure('The player is not an AI character.');
+    return this.operation(id,input.expectedVersion,async(story,env)=>{
+      const old=story.branches[story.activeBranchId],state=branchWorld(old);
+      if(!state.characters.some(c=>c.id===input.characterId))throw failure('Character not found.',404);
+      const newId=makeId();env.traceContext.parentBranchId=old.id;env.traceContext.branchId=newId;
+      const result=applyCharacterPrompt({state,characterId:input.characterId,systemPrompt:input.systemPrompt});
+      story.branches[newId]={...clone(old),id:newId,name:`Character instructions ${Object.keys(story.branches).length}`,parentId:old.id,forkMessageId:old.messages.at(-1)?.id??null,createdAt:new Date().toISOString(),messages:[...clone(old.messages),...result.messages]};
+      story.activeBranchId=newId;story.illustrationJob={status:'cancelled'};
+    },{interruptImages:true,illustrate:false});
+  }
   async export(id) {
     const story=await this.store.get(id),images={};
     for(const branch of Object.values(story.branches)) for(const image of branch.illustrations) if(!images[image.url]) images[image.url]=(await this.store.image(image.url)).toString('base64');
@@ -181,6 +194,7 @@ export class StoryService {
           }
         }
         ids.add(c.id);
+        if(c.systemPrompt!==undefined)text(c.systemPrompt,'imported character system prompt',60000,true);
       }
     };
     let count=0;

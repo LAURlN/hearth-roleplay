@@ -21,6 +21,9 @@ A person already present in the fiction whose individual perspective has not yet
 **Context curator**:
 The independent reader who prepares a person's perspective from evidenced history, distinguishing what that person could perceive from what only the narrator knows.
 
+**Character system prompt**:
+Instructions for portraying a character's voice and behaviour. These are distinct from the person's background and the information they have learned in the story.
+
 **Physical features**:
 A person's established bodily appearance, including features concealed from others. These can change through events in the story.
 

@@ -271,6 +271,47 @@ test('an appearance correction on an empty rewound branch still permits establis
   assert.match(continued.body.world.characters.find(c=>c.id==='player').appearance,/red coat/);
 });
 
+test('character prompts compose on actual actor calls and stay out of other actor and backstage context',async t=>{
+  const f=await fixture(t);
+  assert.equal((await f.request('/api/settings','PUT',{characterPrompt:'CUSTOM SHARED ACTOR RULES'})).status,200);
+  const custom={...setup,characters:[{...setup.characters[0],systemPrompt:'PRIVATE ADA ACTOR RULES'},{name:'Cy',systemPrompt:'PRIVATE CY ACTOR RULES'}]};
+  const created=await f.request('/api/stories','POST',custom);assert.equal(created.status,201);
+  const actor=f.fake.calls.find(call=>call.messages[0].content.includes('You play ONLY'));
+  assert.ok(actor.messages[0].content.includes('CUSTOM SHARED ACTOR RULES'));
+  assert.ok(actor.messages[0].content.includes('PRIVATE ADA ACTOR RULES'));
+  assert.ok(!JSON.stringify(actor).includes('PRIVATE CY ACTOR RULES'));
+  const backstage=f.fake.calls.filter(call=>!call.messages[0].content.includes('You play ONLY'));
+  for(const call of backstage)for(const marker of ['PRIVATE ADA ACTOR RULES','PRIVATE CY ACTOR RULES','CUSTOM SHARED ACTOR RULES'])assert.ok(!JSON.stringify(call).includes(marker),marker);
+  assert.equal(created.body.world.characters.find(c=>c.name==='Ada').systemPrompt,'PRIVATE ADA ACTOR RULES');
+  const backup=(await f.request(route(created.body)+'/export')).body;
+  const imported=await f.request('/api/import','POST',backup);assert.equal(imported.status,201);
+  assert.equal(imported.body.world.characters.find(c=>c.name==='Ada').systemPrompt,'PRIVATE ADA ACTOR RULES');
+  const invalid=structuredClone(backup);invalid.story.branches[invalid.story.activeBranchId].messages[0].snapshot.characters.find(c=>c.name==='Ada').systemPrompt={bad:true};
+  assert.equal((await f.request('/api/import','POST',invalid)).status,400);
+  assert.equal((await f.request('/api/settings','PUT',{characterPrompt:''})).status,200);
+  assert.equal((await f.request('/api/settings','PUT',{characterPrompt:null})).status,400);
+});
+
+test('individual prompt editing and clearing preserve branches, need no inference, and allow pre-opening edits',async t=>{
+  const f=await fixture(t),story=(await f.request('/api/stories','POST',{...setup,characters:[{...setup.characters[0],systemPrompt:'OLD ADA RULES'}]})).body;
+  const ada=story.world.characters.find(c=>c.name==='Ada'),baseline=await f.store.get(story.id),calls=f.fake.calls.length;
+  const revised=(await f.request(route(story)+'/character-prompt','POST',{characterId:ada.id,systemPrompt:'NEW ADA RULES',expectedVersion:story.version})).body;
+  assert.equal(f.fake.calls.length,calls);assert.notEqual(revised.activeBranchId,story.activeBranchId);
+  assert.equal(revised.world.characters.find(c=>c.id===ada.id).systemPrompt,'NEW ADA RULES');
+  assert.deepEqual((await f.store.get(story.id)).branches[story.activeBranchId],baseline.branches[story.activeBranchId]);
+  assert.ok(!JSON.stringify(revised.world.characters.flatMap(c=>c.knowledge)).includes('NEW ADA RULES'));
+  const cleared=(await f.request(route(story)+'/character-prompt','POST',{characterId:ada.id,systemPrompt:'',expectedVersion:revised.version})).body;
+  assert.equal(cleared.world.characters.find(c=>c.id===ada.id).systemPrompt,'');
+  const restored=(await f.request(route(story)+'/switch','POST',{branchId:story.activeBranchId,expectedVersion:cleared.version})).body;
+  assert.equal(restored.world.characters.find(c=>c.id===ada.id).systemPrompt,'OLD ADA RULES');
+  const empty=(await f.request(route(story)+'/branch','POST',{mode:'rewind',expectedVersion:restored.version})).body;
+  const beforeOpening=(await f.request(route(story)+'/character-prompt','POST',{characterId:ada.id,systemPrompt:'PRE-OPENING RULES',expectedVersion:empty.version})).body;
+  const continued=await f.request(route(story)+'/continue','POST',{expectedVersion:beforeOpening.version});assert.equal(continued.status,200);
+  assert.equal(continued.body.world.characters.find(c=>c.id===ada.id).systemPrompt,'PRE-OPENING RULES');
+  for(const [characterId,systemPrompt,status] of [['player','No player AI',400],['missing','Unknown actor',404],[ada.id,{bad:true},400],[ada.id,'x'.repeat(60001),400]])assert.equal((await f.request(route(story)+'/character-prompt','POST',{characterId,systemPrompt,expectedVersion:continued.body.version})).status,status);
+  assert.equal((await f.request(route(story)+'/character-prompt','POST',{characterId:ada.id,systemPrompt:'stale',expectedVersion:0})).status,409);
+});
+
 test('illustration at a correction uses canonical concealed/visible facts, while earlier anchors retain their old state',async t=>{
   const f=await fixture(t),story=(await f.request('/api/stories','POST',setup)).body;
   const facts=[{key:'coat',layer:'presentation',text:'red coat',visible:'red coat'},{key:'tattoo',layer:'physical',text:'secret tattoo',visible:''}];

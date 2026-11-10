@@ -8,9 +8,9 @@
     message: null, revision: null, imageIndex: 0, transcriptKey: '',
     setupLoading: false, settingsLoading: false, connection: null, drawerReturn: null,
     booted: false, nearBottom: true, confirmAction: null,
-    libraryArchived: false, libraryTarget: null, visualEditor: null, appearanceSaving: false,
+    libraryArchived: false, libraryTarget: null, visualEditor: null, appearanceSaving: false, promptEditor:null, characterPromptSaving:false,
   };
-  const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'roleplayPrompt',
+  const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'roleplayPrompt', 'characterPrompt',
     'illustratorPrompt', 'autoIllustrate', 'imageCooldown', 'imageQuality', 'imageSize',
     'maxResponders', 'contextMessages'];
   const numericSettings = new Set(['imageCooldown', 'maxResponders', 'contextMessages']);
@@ -130,6 +130,7 @@
     if (dialog.id === 'setup-dialog' && state.setupLoading) return;
     if (dialog.id === 'settings-dialog' && state.settingsLoading) return;
     if (dialog.id === 'appearance-dialog' && state.appearanceSaving) return;
+    if (dialog.id === 'character-prompt-dialog' && state.characterPromptSaving) return;
     dialog.close();
   }
   document.querySelectorAll('dialog').forEach((dialog) => {
@@ -148,7 +149,8 @@
     dialog.addEventListener('cancel', (event) => {
       if ((dialog.id === 'setup-dialog' && state.setupLoading)
         || (dialog.id === 'settings-dialog' && state.settingsLoading)
-        || (dialog.id === 'appearance-dialog' && state.appearanceSaving)) event.preventDefault();
+        || (dialog.id === 'appearance-dialog' && state.appearanceSaving)
+        || (dialog.id === 'character-prompt-dialog' && state.characterPromptSaving)) event.preventDefault();
     });
     dialog.querySelectorAll('[data-close]').forEach((control) => {
       control.addEventListener('click', () => closeDialog(dialog));
@@ -704,6 +706,11 @@
       const card = inspectorCard(character.name || character.id, character.location || 'Whereabouts not established',
         character.id === 'player' ? 'Your persona' : character.location === world.location ? 'At the current location · perception depends on the event' : 'Elsewhere');
       if (character.description) card.append(node('p', '', character.description));
+      if(character.id!=='player'){
+        const prompt=node('details');prompt.append(node('summary','','Character system prompt'));
+        prompt.append(node('p','',character.systemPrompt||'Uses the shared character system prompt with no individual additions.'));
+        const editPrompt=button('Edit character prompt','secondary',()=>openCharacterPrompt(character.id));editPrompt.disabled=locked();prompt.append(editPrompt);card.append(prompt);
+      }
       const visual=node('details');visual.append(node('summary','','Appearance'));
       if(character.visual?.canSee===false)visual.append(node('p','','Currently unable to see · uses previously learned appearance details.'));
       const facts=character.visual?.facts || [];
@@ -786,6 +793,24 @@
     }
   }
   $('open-inspector').addEventListener('click', () => { renderInspector(); openDialog('inspector-dialog'); });
+  function openCharacterPrompt(characterId) {
+    if(!state.story||locked())return;
+    const character=state.story.world.characters.find(c=>c.id===characterId&&c.id!=='player');if(!character)return;
+    state.promptEditor={storyId:state.story.id,branchId:state.story.activeBranchId,characterId};
+    $('character-prompt-title').textContent=`${character.name} · System prompt`;
+    $('character-prompt-text').value=character.systemPrompt||'';
+    inlineError('character-prompt-error',null);openDialog('character-prompt-dialog','character-prompt-text');
+  }
+  $('character-prompt-form').addEventListener('submit',async event=>{
+    event.preventDefault();const target=state.promptEditor;
+    if(!target||state.characterPromptSaving||locked())return;
+    if(state.story?.id!==target.storyId||state.story.activeBranchId!==target.branchId){inlineError('character-prompt-error','The story branch changed. Reopen the prompt editor.');return;}
+    const systemPrompt=$('character-prompt-text').value;
+    state.characterPromptSaving=true;$('character-prompt-form').querySelectorAll('textarea,button').forEach(field=>{field.disabled=true;});
+    const success=await mutateStory('/character-prompt',{characterId:target.characterId,systemPrompt},{errorId:'character-prompt-error',onSuccess:()=>toast('Character prompt saved in a new branch.')});
+    state.characterPromptSaving=false;$('character-prompt-form').querySelectorAll('textarea,button').forEach(field=>{field.disabled=false;});
+    if(success){closeDialog('character-prompt-dialog');closeDialog('inspector-dialog');}
+  });
   function addAppearanceRow(fact={}) {
     const row=node('div','appearance-row');
     const heading=node('div','appearance-row-heading');heading.append(node('strong','','Visual detail'),button('Remove','subtle danger-text',()=>row.remove()));row.append(heading);
@@ -856,11 +881,13 @@
     for (const [key, label, multiline] of [
       ['name', 'Name', false], ['description', 'Background', true], ['appearance', 'Appearance', false],
       ['personality', 'Personality', false], ['goals', 'Goals & motivations', false], ['location', 'Starting location', false],
+      ['systemPrompt','Character-specific system prompt (optional)',true],
     ]) {
       const wrapper = node('label', '', label);
       const field = node(multiline ? 'textarea' : 'input');
       field.dataset.castField = key; field.value = character[key] || '';
       if (multiline) field.rows = 2;
+      if(key==='systemPrompt'){field.rows=4;field.maxLength=60000;field.placeholder='Voice, habits, portrayal rules… Added to the shared character prompt.';}
       if (key === 'name') { field.required = true; field.maxLength = 120; }
       wrapper.append(field); card.append(wrapper);
     }

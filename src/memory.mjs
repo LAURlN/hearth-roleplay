@@ -41,6 +41,7 @@ export function narratorProjection(state) {
   const remembered=new Set(projected.characters.flatMap(c=>c.knowledge.slice(-60).map(k=>k.publicationId).filter(Boolean)));
   projected.publications=projected.publications.filter((pub,index,list)=>index>=list.length-100||remembered.has(pub.id));
   for(const character of projected.characters) {
+    delete character.systemPrompt;
     const start=character.memory?.through??0;
     character.knowledge=character.knowledge.slice(start);
     if(character.memory)delete character.memory.sourceIds;
