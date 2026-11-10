@@ -7,6 +7,7 @@ import {composeResponse,retainResponses,validateResponses} from '../src/presenta
 import {StoryService} from '../src/story-service.mjs';
 import {Store,branchWorld} from '../src/store.mjs';
 import {semanticReply} from './helpers/semantic-fixture.mjs';
+import {createInitialState,runTurn,applyAuthoredMessage} from '../src/engine.mjs';
 
 const sources=[{id:'n',role:'narrator',speaker:'Narrator',text:'Rain rattles against the window.'},{id:'c',role:'character',speaker:'Ada',text:'Ada raises her cup. “Come inside.”'}];
 const proposal=messages=>({parts:messages.map(m=>({text:m.text,sourceMessageIds:[m.id],evidence:[{messageId:m.id,excerpt:m.text}],spoken:[]})),omitted:[],faithful:true});
@@ -58,6 +59,53 @@ test('quoted speech preserves order and multiplicity even inside one merged para
     const value={parts:[{text,sourceMessageIds:messages.map(m=>m.id),evidence:messages.map(m=>({messageId:m.id,excerpt:m.text})),spoken:[]}],omitted:[],faithful:true};
     await assert.rejects(composeResponse(messages,{settings,complete:async()=>JSON.stringify(value)}),/in order, once/);
   }
+});
+
+test('quoted speech rejects surplus repetitions but permits repetitions authored in the sources',async()=>{
+  const utterance={id:'speech',role:'character',speaker:'Ada',text:'“Stay.”'};
+  const repeated=proposal([utterance]);repeated.parts[0].text='“Stay.” “Stay.”';
+  await assert.rejects(composeResponse([utterance],{settings,complete:async()=>JSON.stringify(repeated)}),/multiplicity/);
+  const authored=[utterance,{...utterance,id:'second'}];
+  const response=await composeResponse(authored,{settings,complete:async()=>JSON.stringify(proposal(authored))});
+  assert.equal(response.text,'“Stay.”\n\n“Stay.”');
+});
+
+for(const edited of [false,true])test(`startup descriptions stay before the player and outside the combined ${edited?'edited ':''}response`,async t=>{
+  const state=createInitialState({location:'room',persona:{name:'Pat'},characters:[{name:'Ada',location:'room'}]});
+  for(const c of state.characters)c.visual={initialized:true,revision:1,facts:[]};
+  const ada=state.characters[1];ada.visual.facts=[{key:'coat',layer:'presentation',text:'a red coat',visible:'a red coat'}];
+  const complete=async request=>{
+    const system=request.messages[0].content,data=JSON.parse(request.messages[1].content);
+    if(system.includes('PERCEPTION HELPER')){
+      const result=JSON.parse(semanticReply(request));
+      if(!data.previousPlayerViews[ada.id]?.current?.length)result.description={text:'The visitor wears a red coat.',evidence:[{characterId:ada.id,key:'coat',excerpt:'a red coat'}]};
+      return JSON.stringify(result);
+    }
+    if(system.includes('private input interpreter'))return JSON.stringify({segments:[{kind:'speech',text:data.input}],correction:null,allowMajorTimeSkip:false});
+    if(system.includes('omniscient narrator/planner'))return '{"events":[],"speakers":[],"text":"A quiet moment."}';
+    if(system.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
+    if(system.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null}';
+    if(system.includes('PLAYER PASSAGE PRESENTER'))return JSON.stringify(proposal(data.contributions));
+    throw new Error('Unexpected stage '+request.stage);
+  };
+  const options={state,settings:{...settings,maxResponders:0},complete,unifiedPresentation:true};
+  let result;
+  if(edited){
+    const authored=await applyAuthoredMessage({...options,message:{role:'player',text:'Hello.'}});
+    const continuation=await runTurn({...options,state:authored.state,messages:authored.messages,input:null});
+    result={state:continuation.state,messages:[...authored.messages,...continuation.messages]};
+  }else result=await runTurn({...options,input:'Hello.'});
+  const playerIndex=result.messages.findIndex(m=>m.role==='player');
+  assert.ok(playerIndex>0);assert.ok(result.messages[0].appearanceDescription);
+  const response=await composeResponse(result.messages,{...options});
+  assert.deepEqual(response.sourceMessageIds,result.messages.slice(playerIndex+1).map(m=>m.id));
+  assert.ok(!response.text.includes('red coat'));
+  validateResponses({messages:result.messages,responses:[response]});
+  const {service,view}=await fixture(t),data=await service.export(view.id),branch=data.story.branches[data.story.activeBranchId];
+  Object.assign(branch,{initialState:state,messages:result.messages,responses:[response],illustrations:[]});
+  const imported=await service.import(data);
+  assert.equal(imported.branch.messages[0].id,result.messages[0].id);
+  assert.equal(imported.branch.responses[0].afterMessageId,result.messages[playerIndex].id);
 });
 
 test('presenter refusals and transport failures are terminal; aborts cannot produce a passage',async()=>{

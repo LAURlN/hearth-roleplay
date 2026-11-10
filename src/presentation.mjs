@@ -4,6 +4,7 @@ const stage='Composing the player passage';
 const check=(condition,message)=>{if(!condition)throw new Error(message);};
 const abort=signal=>signal?.throwIfAborted();
 const clean=text=>text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim();
+const quotedText=text=>[...text.matchAll(/(?:"([^"\n]+)"|“([^”\n]+)”|„([^“\n]+)“|«([^»\n]+)»)/g)].map(quote=>quote[1]??quote[2]??quote[3]??quote[4]);
 export const presentationSources=messages=>messages.filter(m=>!m.internal&&m.role!=='player').map(({id,role,speaker,text})=>({id,role,speaker,text:clean(text)})).filter(m=>m.text);
 
 function validate(result,sources){
@@ -34,13 +35,14 @@ function validate(result,sources){
     omitted.add(source.id);
   }
   let speechCursor=0;
+  const expectedQuotes=new Map();
   const spans=result.parts.map(part=>{const start=result.parts.slice(0,result.parts.indexOf(part)).reduce((n,p)=>n+p.text.length+2,0);return {part,start,end:start+part.text.length};});
   for(const source of sources){
     check(covered.has(source.id)||omitted.has(source.id),'Every action/dialogue source must be covered; justify only duplicate environmental omissions.');
     // Exact source citations constrain the rewrite; they cannot prove semantic
     // faithfulness. Also enforce ordinary quoted speech without trusting labels.
-    if(covered.has(source.id))for(const quote of source.text.matchAll(/(?:"([^"\n]+)"|“([^”\n]+)”|„([^“\n]+)“|«([^»\n]+)»)/g)){
-      const wording=quote[1]??quote[2]??quote[3]??quote[4];let found=-1;
+    if(covered.has(source.id))for(const wording of quotedText(source.text)){
+      expectedQuotes.set(wording,(expectedQuotes.get(wording)??0)+1);let found=-1;
       for(const span of spans)if(span.part.sourceMessageIds.includes(source.id)){
         const candidate=output.indexOf(wording,Math.max(speechCursor,span.start));
         if(candidate>=0&&candidate+wording.length<=span.end){found=candidate;break;}
@@ -48,12 +50,16 @@ function validate(result,sources){
       check(found>=0,'Quoted speech must remain verbatim, in order, once for every source utterance.');speechCursor=found+wording.length;
     }
   }
+  const actualQuotes=quotedText(output);
+  for(const [wording,count] of expectedQuotes)check(actualQuotes.filter(quote=>quote===wording).length===count,'Quoted speech must retain matching multiplicity.');
   return output;
 }
 
 export async function composeResponse(messages,env){
   abort(env.signal);
-  const canonical=messages.filter(m=>m.role!=='player');
+  // Startup notices can precede the authored player passage. Keep those at
+  // their original boundary rather than moving them into the later response.
+  const canonical=messages.slice(messages.findLastIndex(m=>m.role==='player')+1);
   if(!canonical.length)return null;
   const sources=presentationSources(canonical);
   const record=text=>({id:randomUUID(),text,sourceMessageIds:canonical.map(m=>m.id),anchorMessageId:canonical.at(-1).id,createdAt:new Date().toISOString()});
