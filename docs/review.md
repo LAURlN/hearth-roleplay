@@ -71,3 +71,13 @@ Reviewer: Codex provider, gpt-6.1-sol on high reasoning effort. Round 1 verdict 
 After S1, root passed syntax checks and all 77 tests. No findings declined; usage figures were not returned. Round 2 checks only S1 and the changed error boundaries.
 
 Round 2 verdict APPROVE: S1 resolved and no related regressions found. Reviewer independently passed syntax checks, both new regressions and all 77 tests on rerun; the initial full run encountered the same transient Windows rename EPERM. No files changed during review. Two rounds total with gpt-6.1-sol on high reasoning effort. Diff after S1 before this final ledger entry: 484 insertions and 43 deletions across 20 files. The increase adds terminal error boundaries and two regression tests. No findings declined; usage figures were not returned. User-authorized publication follows approval. Live OAuth, Android runtime and browser rendering remain untested.
+
+## Illustrator description and narration handoff
+
+Base: 2afb296bdac7d1a035c65448f03fced93ffc0e58. A user debug log confirmed the illustrator received an empty appearance field while visual details remained in the authored persona description. Include full authored descriptions for present people and tell the illustrator to use visual facts from both fields, overriding contradictory earlier image notes. The user explicitly permits private background in this backstage role; actor knowledge filtering remains separate.
+
+A context-handoff audit also found missing recent narration: the illustrator previously saw player observation records only. Include recent narrator passages up to the selected anchor, stripping explicit thought/OOC annotations and excluding snapshots and later passages. Two HTTP regressions reproduced the missing description and prose-only detail before the fixes and passed after. This small scoped fix was checked locally without another delegated review. Live model judgment and Android runtime remain untested.
+
+Other confirmed follow-ups: nearby-character contexts still lack visible details stored only in mixed descriptions (requires public visual-profile extraction, not full biography sharing). Introduction curation still uses a recent transcript window and exact excerpts (older prose-only background identity needs retrieval, and synthesized memories need source-linked validation). The audit did not remove those character-knowledge boundaries.
+
+JavaScript syntax checks passed. All 79 tests passed on rerun after the initial full suite hit the previously documented transient Windows rename EPERM in an existing image/export test. No live OAuth or image generation was performed for this change.

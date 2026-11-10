@@ -21,6 +21,7 @@ Status: implemented as a local first version. Accepted requirements and the desi
 - Starting a story uses a freeform premise and player persona, with optional predefined characters. The narrator establishes the opening and introduces other characters as needed; the setup can be saved and edited for reuse.
 - Provide a configurable general roleplay/narration system prompt and a separate configurable illustrator system prompt. Retain individual character definitions alongside the general rules.
 - The illustrator uses a continuing illustration conversation/history and previous images for character and visual consistency rather than starting unrelated image requests each time.
+- The illustrator is a backstage role and can read full authored descriptions, including private background; its depiction instructions exclude secrets, thoughts and future developments. Include recent narration at the selected illustration boundary so visible prose-only details are available without granting that narration to every character.
 - The user can copy, edit, and delete any player, narrator, or character message.
 - Editing or deleting an earlier message creates a revised story branch and regenerates the AI continuation from that boundary. Preserve the old continuation as a separate recoverable branch. Restore and rebuild dependent world state and character knowledge consistently.
 

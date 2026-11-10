@@ -88,6 +88,8 @@ Rewind restores the saved world and knowledge at the chosen message. Old future 
 
 The illustrator evaluates completed turns separately and generates asynchronously. Continue chatting while it works. Set automatic illustration, cooldown, size, quality and its own instructions in Settings, or request a specific moment manually from its message menu.
 
+The illustrator receives the full authored descriptions of people present, including visual facts entered in the general persona description, as well as recent narration and perceptible observations. Private background can inform its understanding without becoming something characters know. Its instructions distinguish established appearance from hidden motives, thoughts and future events. Explicit thoughts/OOC annotations are stripped from the narration excerpt. Illustrating an earlier passage uses only narration at or before that passage.
+
 Each branch keeps its visual history. Actual prior images are supplied as references: stable character references and relevant recent images. The current proxy accepts up to five reference images per edit request, so Hearth retains the full gallery and selects references within that limit. The first picture uses `/images/generations`; subsequent reference-based pictures use `/images/edits`. Both use the same subscription proxy. Images from an abandoned branch are not used to depict its revised future.
 
 ## Saves and backup

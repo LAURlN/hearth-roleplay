@@ -25,7 +25,7 @@ function fakeProvider() {
     }
     if(system.includes('omniscient narrator/planner')) {
       const opening=payload.world.location==='Opening location';
-      return JSON.stringify({events:opening?[{type:'establish',location:'The inn',label:'Evening',text:'A fire warms the inn.'}]:[],text:'Rain taps against the windows.',speakers:payload.world.characters.filter(c=>c.id!=='player').slice(0,1).map(c=>c.id)});
+      return JSON.stringify({events:opening?[{type:'establish',location:'The inn',label:'Evening',text:'A fire warms the inn.'}]:[],text:fake.narration??'Rain taps against the windows.',speakers:payload.world.characters.filter(c=>c.id!=='player').slice(0,1).map(c=>c.id)});
     }
     if(system.includes('play ONLY')) return JSON.stringify({text:'Welcome. Sit by the fire.',privateState:'I am curious about this traveller.',movement:null,channel:'local',recipients:[]});
     if(system.includes('A human has authored an edited')) return JSON.stringify({events:[{type:'observation',text:payload.message.text,location:payload.world.location}],allowMajorTimeSkip:false});
@@ -183,6 +183,41 @@ test('illustrations use actual prior images and portable exports restore them wi
   const imported=await f.request('/api/import','POST',backup);assert.equal(imported.status,201);assert.notEqual(imported.body.id,story.id);assert.equal(imported.body.branch.illustrations.length,2);
   const restored=await fetch(f.base+imported.body.branch.illustrations[0].url);assert.deepEqual(Buffer.from(await restored.arrayBuffer()),png);
   assert.notEqual(imported.body.branch.illustrations[0].url,second.branch.illustrations[0].url);
+});
+
+test('the illustrator receives visual details embedded in full character descriptions even with an empty appearance field',async t=>{
+  const f=await fixture(t);
+  const description='A tall traveller with short black hair and a silver eyebrow ring. Secretly searching for a missing sibling.';
+  const castDescription='An innkeeper with brown eyes and a long grey braid. Privately worried about a debt.';
+  const story=(await f.request('/api/stories','POST',{...setup,persona:{name:'Rowan',description},characters:[{name:'Ada',description:castDescription}]})).body;
+  assert.equal(story.world.characters.find(c=>c.id==='player').appearance,'');
+  await f.request(route(story)+'/illustrate','POST',{expectedVersion:story.version});
+  await until(()=>f.service.view(story.id),s=>s.illustrationJob.status==='completed');
+  const request=f.fake.calls.find(r=>r.messages[0].content.includes('You are the illustrator'));
+  const payload=JSON.parse(request.messages[1].content[0].text);
+  assert.equal(payload.characters.find(c=>c.id==='player').description,description);
+  assert.equal(payload.characters.find(c=>c.name==='Ada').description,castDescription);
+  assert.match(request.messages[0].content,/blank appearance field does not mean/);
+});
+
+test('illustrating an earlier moment includes its prose-only visual details and excludes later narration and explicit private annotations',async t=>{
+  const f=await fixture(t);
+  const earlier='Amber light falls across the blue curtains.';
+  f.fake.narration=earlier+' [OOC: use a quieter writing style.] [THOUGHT: A hidden fear.]';
+  const story=(await f.request('/api/stories','POST',setup)).body;
+  assert.ok(!JSON.stringify(story.world.characters.find(c=>c.id==='player').knowledge).includes(earlier));
+  const anchor=story.branch.messages.at(-1).id;
+  f.fake.narration='Later, the curtains are green and the room is sunlit.';
+  const later=(await f.request(route(story)+'/continue','POST',{expectedVersion:story.version})).body;
+  await f.request(route(story)+'/illustrate','POST',{messageId:anchor,expectedVersion:later.version});
+  await until(()=>f.service.view(story.id),s=>s.illustrationJob.status==='completed');
+  const request=f.fake.calls.find(r=>r.messages[0].content.includes('You are the illustrator'));
+  const payload=JSON.parse(request.messages[1].content[0].text);
+  assert.ok(payload.narration.some(m=>m.text===earlier));
+  assert.ok(!JSON.stringify(payload).includes('curtains are green'));
+  assert.ok(!JSON.stringify(payload).includes('quieter writing style'));
+  assert.ok(!JSON.stringify(payload).includes('hidden fear'));
+  assert.ok(payload.narration.every(m=>!Object.hasOwn(m,'snapshot')));
 });
 
 test('a late image result cannot attach to a rewound branch',async t=>{
