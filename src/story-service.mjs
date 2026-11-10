@@ -1,4 +1,5 @@
-import { createInitialState, runTurn, applyAuthoredMessage } from './engine.mjs';
+import { createInitialState, runTurn, applyAuthoredMessage,applyVisualCorrection } from './engine.mjs';
+import {validateVisualFacts} from './visuals.mjs';
 import { makeId, clone, branchWorld, publicStory } from './store.mjs';
 import { createProvider } from './provider.mjs';
 import { Illustrator } from './illustrator.mjs';
@@ -6,7 +7,7 @@ import { compactKnowledge,narratorProjection } from './memory.mjs';
 import { loggedProvider,formatDebugLog,appendDebugError } from './debug-log.mjs';
 
 const failure=(message,status=400,code)=>Object.assign(new Error(message),{status,code});
-const transcript=messages=>messages.map(({snapshot,...message})=>({...message,storyTime:message.storyTime??snapshot?.time}));
+const transcript=messages=>messages.map(({snapshot,...message})=>({...message,storyTime:message.storyTime??snapshot?.time,eventCount:snapshot?.events?.length??message.eventCount}));
 function text(value,name,limit=60000,empty=false) { if(typeof value!=='string'||(!empty&&!value.trim())||value.length>limit) throw failure(`Invalid ${name}.`);return value; }
 export function validateSetup(input) {
   if(!input||typeof input!=='object'||Array.isArray(input)) throw failure('Invalid story setup.');
@@ -27,6 +28,19 @@ export class StoryService {
     this.store=store;this.makeProvider=makeProvider;this.busy=new Map();this.illustrator=new Illustrator({store,makeProvider});
   }
   async view(id) { return publicStory(await this.store.get(id),this.busy.get(id)); }
+  async metadata(id,input) {
+    this.ensureFree(id);
+    if(!input||typeof input!=='object'||Array.isArray(input)||(input.title===undefined&&input.archived===undefined))throw failure('Choose a title or archive change.');
+    const title=input.title===undefined?undefined:text(input.title,'story title',160).trim();
+    if(title!==undefined&&!title)throw failure('Enter a story title.');
+    if(input.archived!==undefined&&typeof input.archived!=='boolean')throw failure('Invalid archive setting.');
+    await this.store.mutate(id,undefined,story=>{
+      this.assertVersion(story,input.expectedVersion);
+      if(title!==undefined){story.title=title;story.setup.title=title;}
+      if(input.archived!==undefined)story.archived=input.archived;
+    });
+    return this.view(id);
+  }
   ensureFree(id) { if(this.busy.has(id)) throw failure('This story is already generating. Stop it or wait for the current turn.',409,'STORY_BUSY'); }
   assertVersion(story,version) {if(!Number.isInteger(version)||version!==story.version) throw failure('This story changed. Refresh it before trying again.',409,'STALE_STORY');}
   env(settings,lease,traceContext) {
@@ -126,6 +140,20 @@ export class StoryService {
     this.ensureFree(id);this.assertVersion(await this.store.get(id),expectedVersion);
     await this.illustrator.schedule(id,{manual:true,messageId});return this.view(id);
   }
+  async appearance(id,input) {
+    text(input.characterId,'character identity',100);
+    if(input.canSee!==undefined&&typeof input.canSee!=='boolean')throw failure('Invalid visual perception access.');
+    try{validateVisualFacts(input.facts);}catch(error){throw failure(error.message);}
+    return this.operation(id,input.expectedVersion,async(story,env)=>{
+      const old=story.branches[story.activeBranchId];
+      if(!branchWorld(old).characters.some(c=>c.id===input.characterId))throw failure('Character not found.',404);
+      const newId=makeId();
+      env.traceContext.parentBranchId=old.id;env.traceContext.branchId=newId;
+      const result=await applyVisualCorrection({...env,state:branchWorld(old),messages:transcript(old.messages),characterId:input.characterId,facts:input.facts,canSee:input.canSee});
+      story.branches[newId]={...clone(old),id:newId,name:`Appearance correction ${Object.keys(story.branches).length}`,parentId:old.id,forkMessageId:old.messages.at(-1)?.id??null,createdAt:new Date().toISOString(),messages:[...clone(old.messages),...result.messages]};
+      story.activeBranchId=newId;story.illustrationJob={status:'cancelled'};
+    },{interruptImages:true,illustrate:false});
+  }
   async export(id) {
     const story=await this.store.get(id),images={};
     for(const branch of Object.values(story.branches)) for(const image of branch.illustrations) if(!images[image.url]) images[image.url]=(await this.store.image(image.url)).toString('base64');
@@ -142,6 +170,16 @@ export class StoryService {
       const ids=new Set();
       for(const c of world.characters) {
         if(typeof c.id!=='string'||ids.has(c.id)||typeof c.name!=='string'||typeof c.location!=='string'||!Array.isArray(c.knowledge)||!c.online||typeof c.online.access!=='boolean') throw failure('An imported character is invalid.');
+        if(c.visual!==undefined){
+          if(c.visual?.initialized!==true||!Number.isInteger(c.visual.revision)||c.visual.revision<0||(c.visual.canSee!==undefined&&typeof c.visual.canSee!=='boolean'))throw failure('Invalid imported visual state.');
+          try{validateVisualFacts(c.visual.facts);}catch(error){throw failure(error.message);}
+        }
+        if(c.seenAppearance!==undefined){
+          if(!c.seenAppearance||typeof c.seenAppearance!=='object'||Array.isArray(c.seenAppearance))throw failure('Invalid imported appearance memories.');
+          for(const view of Object.values(c.seenAppearance))for(const key of ['facts','current']){
+            if(!Array.isArray(view?.[key])||view[key].some(f=>typeof f.key!=='string'||typeof f.text!=='string'))throw failure('Invalid imported appearance memories.');
+          }
+        }
         ids.add(c.id);
       }
     };

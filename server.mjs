@@ -57,7 +57,7 @@ export async function createApp({dataDir=process.env.HEARTH_DATA_DIR||path.join(
       if(method==='GET'&&pathname==='/api/stories') return send(await store.list());
       if(method==='POST'&&pathname==='/api/stories') return send(await service.create(await jsonBody(request)),201);
       if(method==='POST'&&pathname==='/api/import') return send(await service.import(await jsonBody(request,64*1024*1024)),201);
-      const route=/^\/api\/stories\/([a-zA-Z0-9_-]{1,100})(?:\/(turn|continue|cancel|branch|switch|illustrate|export|debug))?$/.exec(pathname);
+      const route=/^\/api\/stories\/([a-zA-Z0-9_-]{1,100})(?:\/(turn|continue|cancel|branch|switch|illustrate|export|debug|metadata|appearance))?$/.exec(pathname);
       if(route) {
         const [,id,action]=route;
         if(method==='GET'&&!action) return send(await service.view(id));
@@ -73,11 +73,13 @@ export async function createApp({dataDir=process.env.HEARTH_DATA_DIR||path.join(
         if(method==='POST') {
           const body=await jsonBody(request);
           if(action==='turn') return send(await service.turn(id,body.expectedVersion,body.text));
+          if(action==='metadata') return send(await service.metadata(id,body));
           if(action==='continue') return send(await service.turn(id,body.expectedVersion,null));
           if(action==='cancel') return send(await service.cancel(id));
           if(action==='branch') return send(await service.branch(id,body));
           if(action==='switch') return send(await service.switch(id,body));
           if(action==='illustrate') return send(await service.illustrate(id,body));
+          if(action==='appearance') return send(await service.appearance(id,body));
         }
       }
       if(method==='GET'&&pathname.startsWith('/images/')) {

@@ -81,3 +81,27 @@ A context-handoff audit also found missing recent narration: the illustrator pre
 Other confirmed follow-ups: nearby-character contexts still lack visible details stored only in mixed descriptions (requires public visual-profile extraction, not full biography sharing). Introduction curation still uses a recent transcript window and exact excerpts (older prose-only background identity needs retrieval, and synthesized memories need source-linked validation). The audit did not remove those character-knowledge boundaries.
 
 JavaScript syntax checks passed. All 79 tests passed on rerun after the initial full suite hit the previously documented transient Windows rename EPERM in an existing image/export test. No live OAuth or image generation was performed for this change.
+
+## Maintained appearance and library management
+
+Base: a139b17980a9c5fa43aaed8ae8499d81ccba71d4. User approved maintained physical features, current presentation, source-linked helper updates and observer-specific last-seen appearances, including correction and rewind. Also requested archive/rename/delete directly from library history.
+
+Implemented source-linked visual helper patches at resolved boundaries, separate actual/visible descriptions, remembered observer views, and sight access for established blindness/temporary inability to see. Pure player speech and private spans do not directly become physical-update sources. Self actor contexts strip backstage source excerpts; other actor views receive only visible and previously observed details. Historical recipients retain intermediate appearance updates during skips. Illustrator uses selected-anchor visual state and concealment instructions. Semantic extraction and perception judgments remain model-dependent.
+
+Appearance corrections create a new branch and checkpoint; inspector editing supports flexible details and sight correction. Old branches/snapshots remain untouched. Existing saves initialize lazily at their next resolved boundary. Imports validate new visual fields. Library metadata updates are inference-free, version/busy guarded, persist archive/title, and preserve branches. UI exposes per-entry management, active/archive filters, target-safe deletion and correction draft recovery.
+
+Repeated Windows replacement-lock EPERM in the existing image tests motivated bounded atomic rename retries for Windows EPERM/EBUSY only. Prior saves are never deleted as fallback. Added a focused retry regression.
+
+Checks before independent review: all 96 tests passed, covering engine, HTTP, metadata, UI-controller and storage regressions; static DOM selector/ID and JavaScript syntax checks passed. No live inference, Android runtime or browser rendering tested. Review round 1 pending.
+
+Round 1: Codex provider, gpt-6.1-sol on high reasoning effort, verdict CHANGES. Reviewer independently passed syntax checks, all 96 tests and diff whitespace checks. Initial diff: 733 insertions and 43 deletions across 19 files. No files changed during review.
+
+| ID | Severity | Outcome |
+| --- | --- | --- |
+| S1 | blocker | Fixed: local encounter sources replay pairwise perception for their recorded participants, including arrival/departure sources with no visual patches. A full runTurn skip regression now retains a visitor's red-coat view without learning the later green coat. |
+| S2 | blocker | Fixed: pre-opening visual_correction events are allowed by the opening establishment guard. HTTP regression rewinds to an empty branch, corrects appearance and successfully continues into the opening. |
+| S3 | should | Fixed: initialization evidence is sorted by fictional time and checkpoint/event boundary with stable ties. Message eventCount and legacy snapshot event counts preserve equal-time ordering. Regression covers older red narration versus newer green events at distinct and equal times. |
+
+All three focused regressions failed before the fixes and pass afterward. Root passed syntax checks and all 99 tests after the fixes. No findings declined; usage figures were not returned. Diff before this ledger addition: 792 insertions and 45 deletions across 19 files. Round 2 checks open findings and changed chronology/opening code only.
+
+Round 2 verdict APPROVE: S1/S2/S3 resolved, with no concrete related regressions. Reviewer independently passed 28 targeted tests, syntax and whitespace checks, and additional speaker/sight-guard/legacy-boundary checks. No code changed during review. Two rounds total with gpt-6.1-sol on high reasoning effort; no findings declined and usage figures were not returned. Diff before this final entry: 802 insertions and 45 deletions across 19 files. The increase adds encounter replay, legacy source ordering, opening compatibility and three regression tests. User-authorized publication follows approval; no live subscription inference, Android runtime or browser rendering verification was performed.

@@ -14,6 +14,7 @@ function fakeProvider() {
     fake.calls.push(request);
     if(fake.fail) throw new Error('Scripted provider failure');
     const system=request.messages[0].content;
+    if(system.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     const raw=request.messages[1].content;
     const payload=JSON.parse(Array.isArray(raw)?raw[0].text:raw);
     if(system.includes('private input interpreter')) {
@@ -236,6 +237,53 @@ test('malformed imports and revisions never replace existing saved stories',asyn
   assert.equal((await f.request(route(story)+'/branch','POST',{mode:'delete',messageId:'does-not-exist',expectedVersion:story.version})).status,404);
   assert.equal((await f.request('/api/stories')).body.length,1);
   assert.deepEqual((await f.request(route(story))).body.branch,story.branch);
+});
+
+test('human visual corrections create durable branches and rewind restores appearance and observers together',async t=>{
+  const f=await fixture(t),story=(await f.request('/api/stories','POST',setup)).body;
+  const original=await f.store.get(story.id);
+  const facts=[{key:'hair',layer:'physical',text:'green hair',visible:'green hair'},{key:'tattoo',layer:'physical',text:'a hidden tattoo',visible:''}];
+  const corrected=await f.request(route(story)+'/appearance','POST',{characterId:'player',facts,expectedVersion:story.version});
+  assert.equal(corrected.status,200);assert.notEqual(corrected.body.activeBranchId,story.activeBranchId);
+  assert.equal(corrected.body.branches.length,2);
+  const player=corrected.body.world.characters.find(c=>c.id==='player'),ada=corrected.body.world.characters.find(c=>c.name==='Ada');
+  assert.equal(player.visual.facts[0].text,'green hair');assert.match(ada.seenAppearance.player.current[0].text,/green hair/);
+  assert.ok(!JSON.stringify(ada.seenAppearance).includes('hidden tattoo'));
+  const saved=await f.store.get(story.id);
+  assert.deepEqual(saved.branches[story.activeBranchId],original.branches[story.activeBranchId]);
+  const target=story.branch.messages.at(-1).id;
+  const rewound=(await f.request(route(story)+'/branch','POST',{mode:'rewind',messageId:target,expectedVersion:corrected.body.version})).body;
+  assert.deepEqual(rewound.world,story.world);
+  const backup=(await f.request(route(story)+'/export')).body;
+  const imported=await f.request('/api/import','POST',backup);assert.equal(imported.status,201);
+  assert.equal((await f.request(route(story)+'/appearance','POST',{characterId:'missing',facts,expectedVersion:rewound.version})).status,404);
+  assert.equal((await f.request(route(story)+'/appearance','POST',{characterId:'player',facts:[{key:'bad',layer:'physical',text:'bad',visible:null}],expectedVersion:rewound.version})).status,400);
+});
+
+test('an appearance correction on an empty rewound branch still permits establishing the opening',async t=>{
+  const f=await fixture(t),story=(await f.request('/api/stories','POST',setup)).body;
+  const empty=(await f.request(route(story)+'/branch','POST',{mode:'rewind',expectedVersion:story.version})).body;
+  assert.equal(empty.branch.messages.length,0);
+  const corrected=(await f.request(route(story)+'/appearance','POST',{characterId:'player',facts:[{key:'coat',layer:'presentation',text:'red coat',visible:'red coat'}],expectedVersion:empty.version})).body;
+  assert.equal(corrected.world.location,'Opening location');
+  const continued=await f.request(route(story)+'/continue','POST',{expectedVersion:corrected.version});
+  assert.equal(continued.status,200);assert.equal(continued.body.world.location,'The inn');
+  assert.match(continued.body.world.characters.find(c=>c.id==='player').appearance,/red coat/);
+});
+
+test('illustration at a correction uses canonical concealed/visible facts, while earlier anchors retain their old state',async t=>{
+  const f=await fixture(t),story=(await f.request('/api/stories','POST',setup)).body;
+  const facts=[{key:'coat',layer:'presentation',text:'red coat',visible:'red coat'},{key:'tattoo',layer:'physical',text:'secret tattoo',visible:''}];
+  const corrected=(await f.request(route(story)+'/appearance','POST',{characterId:'player',facts,expectedVersion:story.version})).body;
+  await f.request(route(story)+'/illustrate','POST',{expectedVersion:corrected.version});
+  await until(()=>f.service.view(story.id),s=>s.illustrationJob.status==='completed');
+  let request=f.fake.calls.filter(r=>r.messages[0].content.includes('You are the illustrator')).at(-1);
+  let payload=JSON.parse(request.messages[1].content[0].text);
+  assert.deepEqual(payload.characters.find(c=>c.id==='player').visual.facts.map(({key,text,visible})=>({key,text,visible})),facts.map(({key,text,visible})=>({key,text,visible})));
+  await f.request(route(story)+'/illustrate','POST',{messageId:story.branch.messages.at(-1).id,expectedVersion:corrected.version});
+  await until(()=>f.service.view(story.id),s=>s.branch.illustrations.length===2);
+  request=f.fake.calls.filter(r=>r.messages[0].content.includes('You are the illustrator')).at(-1);payload=JSON.parse(request.messages[1].content[0].text);
+  assert.equal(payload.characters.find(c=>c.id==='player').visual.facts.length,0);
 });
 
 test('a restart marks orphaned persisted image work as interrupted instead of polling forever',async t=>{

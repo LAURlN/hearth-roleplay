@@ -17,6 +17,9 @@ const actor = (text, extra = {}) => ({ text, privateState: 'My own reflection.',
 function fake(...responses) {
   const calls = [];
   const complete = async request => {
+    // These existing orchestration tests script dialogue, not visual parsing.
+    // Dedicated visual-state tests exercise real patches and helper failures.
+    if(request.messages[0].content.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     calls.push(request);
     assert.equal(request.model, 'test-model');
     assert.equal(request.json, true);
@@ -121,6 +124,7 @@ test('empty local recipient lists deliver player speech and a generated answer t
   ];
   const calls=[];
   const complete=async request=>{
+    if(request.messages[0].content.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     calls.push(request);
     if(request.messages[0].content.includes('brief player-visible pause'))return JSON.stringify({text:'The room settles.'});
     const response=responses.shift();assert.ok(response,'Unexpected completion');
@@ -501,7 +505,7 @@ test('an independent helper restores evidenced background observations before th
       return actor('Yes, beside the window.');
     },
   ];
-  const complete=async request=>{models.push(request.model);const response=responses.shift();assert.ok(response);return JSON.stringify(typeof response==='function'?response(request):response);};
+  const complete=async request=>{if(request.messages[0].content.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';models.push(request.model);const response=responses.shift();assert.ok(response);return JSON.stringify(typeof response==='function'?response(request):response);};
   const result=await turn(opening.state,complete,{input,messages:history,settings:{...settings,helperModel:'test-helper'},onStage:s=>stages.push(s)});
   assert.deepEqual(models,['test-helper','test-model','test-helper','test-model']);
   assert.ok(stages.includes('Preparing new character context'));

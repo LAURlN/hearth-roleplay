@@ -2,6 +2,15 @@
 
 Status: implemented as a local first version. Accepted requirements and the design reasoning are retained below. See README.md for setup and docs/implementation-contract.md for module interfaces.
 
+## Appearance continuity
+
+- Maintain a character's established physical features separately from their current presentation: clothing, hairstyle, dirt/wetness, visible injuries, disguises and concealment. Stable features can still change through established events; do not treat the initial profile as immutable. Use flexible descriptions rather than an exhaustive clothing/body schema.
+- At setup or introduction, a helper extracts established visual facts from mixed descriptions and retains their source. Keep unknown details unknown; full biographies remain available to backstage roles without becoming actor knowledge.
+- A separate helper proposes small sourced updates after relevant resolved events, before constructing the next affected actor's context or illustration. Apply actual outcomes, not intentions, hypotheticals, rumours or unaccepted narrator proposals. Preserve unchanged facts and support explicit removal/replacement. Do not invent character choices while maintaining state.
+- Distinguish actual appearance, currently perceivable appearance, and what each observer remembers. Clothing can conceal a tattoo; absence prevents witnessing a haircut. Returning observers may perceive a change when they encounter the person again. Precise measurements or hidden traits are not automatically learned through sight.
+- Save appearance changes and resulting observations at the same chronological boundary as the source event. Snapshots and branch replay restore physical state, concealment, observer memories and illustration context together. Never mutate older snapshots in place.
+- Give the illustrator authoritative visual state plus broader background and prior references, marking concealment/current presentation. Established changes supersede obsolete image notes. Generated images and illustration notes never establish new story facts by themselves. Expose the resulting state for human inspection/correction, with corrections following branch semantics.
+
 ## Accepted requirements
 
 - Focus on freeform text roleplay, without the old combat, equipment, and game-content generation systems.

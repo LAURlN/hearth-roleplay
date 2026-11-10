@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, rename, unlink, readdir, realpath, appendFi
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { DEFAULT_SETTINGS, normalizeSettings } from './settings.mjs';
+import {setTimeout as delay} from 'node:timers/promises';
 
 export const makeId = () => randomUUID();
 export const clone = value => structuredClone(value);
@@ -9,12 +10,21 @@ export const directoryIdentity = async directory => createHash('sha256').update(
 export const branchWorld = branch => clone(branch.messages.at(-1)?.snapshot ?? branch.initialState);
 export const assertId = id => { if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw Object.assign(new Error('Invalid identifier.'),{status:400}); return id; };
 
+export async function atomicRename(from,to,{renameFile=rename,platform=process.platform}={}) {
+  for(let attempt=0;;attempt++)try{return await renameFile(from,to);}catch(error){
+    if(platform!=='win32'||!['EPERM','EBUSY'].includes(error.code)||attempt>=4)throw error;
+    // Windows readers/antivirus can briefly hold the destination. Keep the
+    // original intact while retrying replacement; never unlink it as fallback.
+    await delay(20*2**attempt);
+  }
+}
+
 export class Store {
   constructor(directory) { this.directory = directory; this.locks = new Map(); this.deletedIds = new Set(); }
   async init() { await mkdir(path.join(this.directory,'stories'),{recursive:true}); await mkdir(path.join(this.directory,'images'),{recursive:true}); await mkdir(path.join(this.directory,'debug'),{recursive:true}); }
   async atomic(filename, value) {
     const temp = `${filename}.${makeId()}.tmp`;
-    try { await writeFile(temp,typeof value==='string'?value:JSON.stringify(value),{mode:0o600,flush:true}); await rename(temp,filename); }
+    try { await writeFile(temp,typeof value==='string'?value:JSON.stringify(value),{mode:0o600,flush:true}); await atomicRename(temp,filename); }
     finally { await unlink(temp).catch(()=>{}); }
   }
   async settings() {
@@ -49,7 +59,7 @@ export class Store {
   async list() {
     const names=await readdir(path.join(this.directory,'stories'));
     const results=await Promise.all(names.filter(x=>x.endsWith('.json')).map(async name=>{
-      try { const s=await this.get(name.slice(0,-5)); return {id:s.id,title:s.title,updatedAt:s.updatedAt,messageCount:s.branches[s.activeBranchId].messages.length,branchCount:Object.keys(s.branches).length}; }
+      try { const s=await this.get(name.slice(0,-5)); return {id:s.id,title:s.title,archived:s.archived===true,version:s.version,updatedAt:s.updatedAt,messageCount:s.branches[s.activeBranchId].messages.length,branchCount:Object.keys(s.branches).length}; }
       catch { return null; }
     }));
     return results.filter(Boolean).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
@@ -75,5 +85,5 @@ export class Store {
 
 export function publicStory(story,busy={}) {
   const branch=story.branches[story.activeBranchId];
-  return {id:story.id,title:story.title,setup:story.setup,createdAt:story.createdAt,updatedAt:story.updatedAt,version:story.version,activeBranchId:story.activeBranchId,branches:Object.values(story.branches).map(b=>({id:b.id,name:b.name,parentId:b.parentId,forkMessageId:b.forkMessageId,messageCount:b.messages.length,createdAt:b.createdAt})),branch:{id:branch.id,name:branch.name,messages:branch.messages.map(({snapshot,...message})=>message),illustrations:branch.illustrations},world:branchWorld(branch),busy:Boolean(busy.controller),stage:busy.stage??'',illustrationJob:story.illustrationJob};
+  return {id:story.id,title:story.title,archived:Boolean(story.archived),setup:story.setup,createdAt:story.createdAt,updatedAt:story.updatedAt,version:story.version,activeBranchId:story.activeBranchId,branches:Object.values(story.branches).map(b=>({id:b.id,name:b.name,parentId:b.parentId,forkMessageId:b.forkMessageId,messageCount:b.messages.length,createdAt:b.createdAt})),branch:{id:branch.id,name:branch.name,messages:branch.messages.map(({snapshot,...message})=>message),illustrations:branch.illustrations},world:branchWorld(branch),busy:Boolean(busy.controller),stage:busy.stage??'',illustrationJob:story.illustrationJob};
 }

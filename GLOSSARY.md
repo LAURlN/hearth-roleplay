@@ -21,6 +21,15 @@ A person already present in the fiction whose individual perspective has not yet
 **Context curator**:
 The independent reader who prepares a person's perspective from evidenced history, distinguishing what that person could perceive from what only the narrator knows.
 
+**Physical features**:
+A person's established bodily appearance, including features concealed from others. These can change through events in the story.
+
+**Current presentation**:
+How a person is dressed and otherwise presented at a particular moment, including disguises, concealment and temporary visual conditions.
+
+**Observed appearance**:
+The visual details a particular observer perceived at an encounter. A remembered appearance can differ from the person's current appearance.
+
 **Presence**:
 A character's physical whereabouts at a particular point in the story, including their arrival at and departure from a location.
 _Avoid_: Speaking status

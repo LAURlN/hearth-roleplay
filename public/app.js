@@ -8,6 +8,7 @@
     message: null, revision: null, imageIndex: 0, transcriptKey: '',
     setupLoading: false, settingsLoading: false, connection: null, drawerReturn: null,
     booted: false, nearBottom: true, confirmAction: null,
+    libraryArchived: false, libraryTarget: null, visualEditor: null, appearanceSaving: false,
   };
   const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'roleplayPrompt',
     'illustratorPrompt', 'autoIllustrate', 'imageCooldown', 'imageQuality', 'imageSize',
@@ -128,6 +129,7 @@
     if (typeof dialog === 'string') dialog = $(dialog);
     if (dialog.id === 'setup-dialog' && state.setupLoading) return;
     if (dialog.id === 'settings-dialog' && state.settingsLoading) return;
+    if (dialog.id === 'appearance-dialog' && state.appearanceSaving) return;
     dialog.close();
   }
   document.querySelectorAll('dialog').forEach((dialog) => {
@@ -145,7 +147,8 @@
     });
     dialog.addEventListener('cancel', (event) => {
       if ((dialog.id === 'setup-dialog' && state.setupLoading)
-        || (dialog.id === 'settings-dialog' && state.settingsLoading)) event.preventDefault();
+        || (dialog.id === 'settings-dialog' && state.settingsLoading)
+        || (dialog.id === 'appearance-dialog' && state.appearanceSaving)) event.preventDefault();
     });
     dialog.querySelectorAll('[data-close]').forEach((control) => {
       control.addEventListener('click', () => closeDialog(dialog));
@@ -193,25 +196,34 @@
     const list = $('story-list');
     list.replaceChildren();
     const query = $('story-search').value.toLocaleLowerCase().trim();
-    const summaries = [...state.stories].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    const summaries = [...state.stories].filter(story=>Boolean(story.archived)===state.libraryArchived).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
     $('story-count').textContent = String(summaries.length);
+    $('library-active').setAttribute('aria-pressed',String(!state.libraryArchived));
+    $('library-archived').setAttribute('aria-pressed',String(state.libraryArchived));
     summaries.filter((story) => String(story.title).toLocaleLowerCase().includes(query)).forEach((story) => {
+      const row=node('div','story-row');
       const item = button('', 'story-item', () => selectStory(story.id));
       item.disabled = Boolean(state.operation || state.selecting);
       item.setAttribute('aria-current', String(story.id === state.story?.id));
       item.append(node('span', 'story-item-title', story.title || 'Untitled story'));
       item.append(node('span', 'story-item-meta', `${dateLabel(story.updatedAt)} · ${story.messageCount || 0} passages · ${story.branchCount || 1} ${story.branchCount === 1 ? 'branch' : 'branches'}`));
-      list.append(item);
+      const actions=button('···','icon-button library-story-actions',()=>openLibraryActions(story.id));
+      actions.setAttribute('aria-label',`Manage ${story.title||'Untitled story'}`);
+      actions.setAttribute('aria-haspopup','dialog');
+      actions.disabled=Boolean(state.operation||state.selecting||(state.story?.id===story.id&&state.story.busy));
+      row.append(item,actions);list.append(row);
     });
-    if (!list.childElementCount) list.append(node('p', 'library-note muted', query ? 'No stories match your search.' : 'Your next world belongs here. Begin a story above.'));
+    if (!list.childElementCount) list.append(node('p', 'library-note muted', query ? 'No stories match your search.' : state.libraryArchived?'No archived stories.':'Your next world belongs here. Begin a story above.'));
   }
   $('story-search').addEventListener('input', renderLibrary);
+  $('library-active').addEventListener('click',()=>{state.libraryArchived=false;renderLibrary();});
+  $('library-archived').addEventListener('click',()=>{state.libraryArchived=true;renderLibrary();});
   async function refreshLibrary() {
     try { state.stories = await api('/api/stories'); renderLibrary(); }
     catch { /* The story response already confirms the primary save. */ }
   }
   function upsertSummary(story) {
-    const summary = { id: story.id, title: story.title, updatedAt: story.updatedAt,
+    const summary = { id: story.id, title: story.title, archived:Boolean(story.archived), version:story.version, updatedAt: story.updatedAt,
       messageCount: story.branch.messages.length, branchCount: story.branches.length };
     const index = state.stories.findIndex((item) => item.id === story.id);
     if (index < 0) state.stories.unshift(summary);
@@ -692,6 +704,18 @@
       const card = inspectorCard(character.name || character.id, character.location || 'Whereabouts not established',
         character.id === 'player' ? 'Your persona' : character.location === world.location ? 'At the current location · perception depends on the event' : 'Elsewhere');
       if (character.description) card.append(node('p', '', character.description));
+      const visual=node('details');visual.append(node('summary','','Appearance'));
+      if(character.visual?.canSee===false)visual.append(node('p','','Currently unable to see · uses previously learned appearance details.'));
+      const facts=character.visual?.facts || [];
+      for(const fact of facts){
+        const detail=node('div','appearance-fact');
+        detail.append(node('strong','',`${fact.key} · ${fact.layer==='physical'?'Physical feature':'Current presentation'}`),node('p','',fact.text));
+        detail.append(node('small','',fact.visible?`Visible: ${fact.visible}`:'Concealed / not currently visible'));
+        if(fact.source)detail.append(node('small','',`Source: ${fact.source.excerpt||fact.source.id||displayValue(fact.source)}`));
+        visual.append(detail);
+      }
+      if(!facts.length)visual.append(node('p','',character.appearance||'No visual details recorded yet.'));
+      const editVisual=button('Correct appearance','secondary',()=>openAppearanceEditor(character.id));editVisual.disabled=locked();visual.append(editVisual);card.append(visual);
       presence.append(card);
       const entry = node('details', 'inspector-card');
       entry.append(node('summary', '', `${character.name || character.id} · ${(character.knowledge || []).length} observations`));
@@ -708,6 +732,16 @@
       }
       if (character.memory?.summary) {
         const memory = node('details'); memory.append(node('summary', '', `Continuity summary · first ${character.memory.through} observations`), node('p', '', character.memory.summary)); entry.append(memory);
+      }
+      if(Object.keys(character.seenAppearance||{}).length){
+        const seen=node('details');seen.append(node('summary','','Remembered appearances'));
+        for(const [subjectId,view] of Object.entries(character.seenAppearance)){
+          const item=node('div','knowledge-entry');
+          item.append(node('h3','',view.name||characters.find(c=>c.id===subjectId)?.name||subjectId));
+          for(const fact of view.facts||[])item.append(node('p','',`${fact.key}: ${fact.text}`));
+          item.append(node('small','',`Last encounter: ${displayValue(view.time)} · ${displayValue(view.location)}`));seen.append(item);
+        }
+        entry.append(seen);
       }
       if (character.online) entry.append(node('small', '', `Online access: ${character.online.access ? 'yes' : 'no'} · Interests: ${displayValue(character.online.interests)} · Connections: ${displayValue(character.online.connections)}`));
       knowledge.append(entry);
@@ -752,6 +786,43 @@
     }
   }
   $('open-inspector').addEventListener('click', () => { renderInspector(); openDialog('inspector-dialog'); });
+  function addAppearanceRow(fact={}) {
+    const row=node('div','appearance-row');
+    const heading=node('div','appearance-row-heading');heading.append(node('strong','','Visual detail'),button('Remove','subtle danger-text',()=>row.remove()));row.append(heading);
+    const grid=node('div','form-grid');
+    for(const [key,label,value] of [['key','Detail name (hair, coat, etc.)',fact.key||''],['layer','Type',fact.layer||'physical']]){
+      const wrapper=node('label','',label),field=node(key==='layer'?'select':'input');field.dataset.visualField=key;
+      if(key==='layer')for(const [value,text] of [['physical','Physical feature'],['presentation','Current presentation']]){const option=node('option','',text);option.value=value;field.append(option);}
+      else{field.required=true;field.maxLength=80;}
+      field.value=value;wrapper.append(field);grid.append(wrapper);
+    }
+    row.append(grid);
+    for(const [key,label] of [['text','Actual description'],['visible','Visible description (empty when concealed)']]){
+      const wrapper=node('label','',label),field=node('textarea');field.dataset.visualField=key;field.rows=2;field.maxLength=4000;field.required=key==='text';field.value=fact[key]||'';wrapper.append(field);row.append(wrapper);
+    }
+    $('appearance-rows').append(row);
+  }
+  function openAppearanceEditor(characterId) {
+    if(!state.story||locked())return;
+    const character=state.story.world.characters.find(c=>c.id===characterId);if(!character)return;
+    state.visualEditor={storyId:state.story.id,branchId:state.story.activeBranchId,characterId};
+    $('appearance-title').textContent=`${character.name} · Appearance`;$('appearance-rows').replaceChildren();
+    $('appearance-can-see').checked=character.visual?.canSee!==false;
+    for(const fact of character.visual?.facts||[])addAppearanceRow(fact);
+    if(!$('appearance-rows').childElementCount)addAppearanceRow();
+    inlineError('appearance-error',null);openDialog('appearance-dialog');
+  }
+  $('add-appearance-detail').addEventListener('click',()=>{if(!state.appearanceSaving)addAppearanceRow();});
+  $('appearance-form').addEventListener('submit',async event=>{
+    event.preventDefault();const target=state.visualEditor;
+    if(!target||state.appearanceSaving||locked())return;
+    if(state.story?.id!==target.storyId||state.story.activeBranchId!==target.branchId){inlineError('appearance-error','The story branch changed. Reopen the appearance editor.');return;}
+    const facts=[...$('appearance-rows').children].map(row=>Object.fromEntries([...row.querySelectorAll('[data-visual-field]')].map(field=>[field.dataset.visualField,field.value.trim()])));
+    state.appearanceSaving=true;$('appearance-form').querySelectorAll('input,textarea,select,button').forEach(field=>{field.disabled=true;});
+    const success=await mutateStory('/appearance',{characterId:target.characterId,facts,canSee:$('appearance-can-see').checked},{errorId:'appearance-error',onSuccess:()=>toast('Appearance corrected in a new branch.')});
+    state.appearanceSaving=false;$('appearance-form').querySelectorAll('input,textarea,select,button').forEach(field=>{field.disabled=false;});
+    if(success){closeDialog('appearance-dialog');closeDialog('inspector-dialog');}
+  });
   const tabs = ['presence', 'knowledge', 'public'];
   function selectInspectorTab(name, focus = false) {
     for (const tab of tabs) {
@@ -966,6 +1037,40 @@
   });
 
   $('open-story-menu').addEventListener('click', () => openDialog('story-menu-dialog'));
+  function openLibraryActions(id) {
+    if(state.operation||state.selecting)return;
+    const story=state.stories.find(item=>item.id===id);
+    if(!story||(state.story?.id===id&&state.story.busy))return;
+    state.libraryTarget={...story};
+    $('library-story-title').value=story.title;
+    $('archive-library-story').textContent=story.archived?'Restore to library':'Archive story';
+    inlineError('library-story-error',null);setDrawer(false);
+    closeDialog('story-menu-dialog');openDialog('library-story-dialog','library-story-title');
+  }
+  async function changeLibraryStory(change) {
+    const target=state.libraryTarget;
+    if(!target||state.operation||state.selecting)return;
+    state.operation={id:target.id,generating:false};
+    for(const id of ['rename-library-story','archive-library-story','delete-library-story'])$(id).disabled=true;
+    inlineError('library-story-error',null);updateControls();renderLibrary();
+    try {
+      const result=await api(storyPath(target.id,'/metadata'),{method:'POST',body:{...change,expectedVersion:target.version}});
+      if(state.story?.id===result.id)applyStory(result);else upsertSummary(result);
+      closeDialog('library-story-dialog');toast(change.title!==undefined?'Story renamed.':change.archived?'Story archived.':'Story restored to the library.');
+    }catch(error){
+      inlineError('library-story-error',error);
+      await refreshLibrary();
+      const latest=state.stories.find(item=>item.id===target.id);
+      if(latest&&state.libraryTarget?.id===target.id)state.libraryTarget={...latest};
+    }finally{
+      state.operation=null;for(const id of ['rename-library-story','archive-library-story','delete-library-story'])$(id).disabled=false;
+      updateControls();renderLibrary();schedulePolling();
+    }
+  }
+  $('library-story-form').addEventListener('submit',event=>{event.preventDefault();changeLibraryStory({title:$('library-story-title').value.trim()});});
+  $('archive-library-story').addEventListener('click',()=>changeLibraryStory({archived:!state.libraryTarget?.archived}));
+  $('delete-library-story').addEventListener('click',()=>{if(state.libraryTarget&&!state.operation)confirmDeleteStory(state.libraryTarget);});
+  $('manage-current-story').addEventListener('click',()=>{if(state.story)openLibraryActions(state.story.id);});
   let debugSequence = 0;
   let debugStoryId = null;
   async function loadDebugLog() {
@@ -1053,35 +1158,35 @@
     } catch (error) { showError(error); }
     finally { state.operation = null; updateControls(); renderLibrary(); schedulePolling(); }
   });
-  $('remove-story').addEventListener('click', () => {
-    if (!state.story || locked()) return;
-    const story = state.story;
+  function confirmDeleteStory(story) {
+    if(!story||state.operation||state.selecting||(state.story?.id===story.id&&state.story.busy))return;
     $('confirm-title').textContent = 'Delete this story?';
     $('confirm-description').textContent = `“${story.title}” and all its branches will be removed from this server. Export it first if you want to keep a copy.`;
     inlineError('confirm-error', null);
     state.confirmAction = async () => {
-      if (state.operation || state.story?.id !== story.id) return;
+      if (state.operation) return;
       state.operation = { id: story.id, generating: false };
       updateControls(); renderLibrary();
       try { await api(storyPath(story.id), { method: 'DELETE' }); }
       catch (error) {
         state.operation = null; updateControls(); renderLibrary(); throw error;
       }
-      stopPolling(); state.selection++;
       state.stories = state.stories.filter((item) => item.id !== story.id);
-      state.story = null; state.transcriptKey = '';
-      state.operation = null;
-      storage.remove('last-story'); storage.remove(`draft:${story.id}`);
-      $('conversation').replaceChildren(); $('composer').value = '';
-      $('story-title').textContent = 'Make yourself at home.';
-      $('header-kicker').textContent = 'A PLACE FOR STORIES';
-      document.title = 'Hearth · A place for stories';
-      hide('story-tools'); hide('writing-area'); hide('conversation'); hide('welcome', false);
-      hide('jump-latest'); clearError(); renderLibrary(); updateControls();
+      if(state.story?.id===story.id){
+        stopPolling();state.selection++;state.story=null;state.transcriptKey='';
+        storage.remove('last-story');
+        $('conversation').replaceChildren();$('composer').value='';
+        $('story-title').textContent='Make yourself at home.';$('header-kicker').textContent='A PLACE FOR STORIES';
+        document.title='Hearth · A place for stories';
+        hide('story-tools');hide('writing-area');hide('conversation');hide('welcome',false);hide('jump-latest');
+      }
+      state.operation=null;storage.remove(`draft:${story.id}`);
+      clearError();renderLibrary();updateControls();schedulePolling();
       closeDialog('confirm-dialog'); toast('Story removed from your library.');
     };
-    closeDialog('story-menu-dialog'); openDialog('confirm-dialog');
-  });
+    closeDialog('story-menu-dialog');closeDialog('library-story-dialog');openDialog('confirm-dialog');
+  }
+  $('remove-story').addEventListener('click',()=>{if(state.story&&!locked())confirmDeleteStory(state.story);});
   $('confirm-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!state.confirmAction || $('confirm-action').disabled) return;
