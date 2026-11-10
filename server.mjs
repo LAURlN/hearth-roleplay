@@ -2,7 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { Store } from './src/store.mjs';
+import { Store, directoryIdentity } from './src/store.mjs';
 import { StoryService } from './src/story-service.mjs';
 import { createProvider } from './src/provider.mjs';
 
@@ -19,6 +19,7 @@ async function jsonBody(request,limit=2*1024*1024) {
 
 export async function createApp({dataDir=process.env.HEARTH_DATA_DIR||path.join(ROOT,'data'),makeProvider=createProvider}={}) {
   const store=new Store(path.resolve(dataDir));await store.init();
+  const instance={pid:process.pid,dataDirectoryId:await directoryIdentity(store.directory)};
   // Jobs cannot survive a stopped Termux process. Do not leave the interface
   // polling an orphaned persisted job forever after a restart.
   for(const summary of await store.list()) {
@@ -42,7 +43,7 @@ export async function createApp({dataDir=process.env.HEARTH_DATA_DIR||path.join(
       if(origin && origin!==`http://${host}`) throw fail('Cross-origin requests are not allowed.',403);
       const url=new URL(request.url,`http://${host}`),pathname=decodeURIComponent(url.pathname);
       const method=request.method;
-      if(method==='GET'&&pathname==='/api/bootstrap') return send({settings:await store.settings(),stories:await store.list(),version:'1.0.0'});
+      if(method==='GET'&&pathname==='/api/bootstrap') return send({settings:await store.settings(),stories:await store.list(),version:'1.0.0',instance});
       if(method==='GET'&&pathname==='/api/settings') return send(await store.settings());
       if(method==='PUT'&&pathname==='/api/settings') {
         const body=await jsonBody(request);

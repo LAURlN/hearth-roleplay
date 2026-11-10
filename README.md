@@ -6,36 +6,39 @@ Hearth uses your existing **openai-oauth** subscription proxy for both text and 
 
 ## Run on Android
 
-Install a current Termux from its maintained distribution, then install Node and Git:
+In Termux, paste this command to install and start Hearth:
 
 ```sh
-pkg update
-pkg install nodejs-lts git
+pkg install -y curl && curl -fsSL https://raw.githubusercontent.com/LAURlN/hearth-roleplay/main/install.sh | bash
 ```
 
-Copy this project directory onto the device (or clone your own repository after you put these files in one). In one Termux session, start the subscription proxy you already use:
+It installs Git/Node if needed, downloads Hearth into `~/hearth`, adds a `hearth` command, reuses your running subscription proxy (or starts `openai-oauth`), and opens the browser. If a ChatGPT login is needed, complete it in your browser. No separate Platform API key is used.
+
+After installation, start it with:
 
 ```sh
-npx openai-oauth
+hearth
 ```
 
-Complete its ChatGPT login if needed. In a second Termux session, enter the Hearth project directory and run:
+Update and start:
 
 ```sh
-npm start
+hearth update
 ```
 
-Open **http://127.0.0.1:8000** in your Android browser. No dependency installation or build is required. Node 22 or newer is required; Node 24 is recommended.
+Stop Hearth with **Ctrl+C** in its Termux session before updating. Your stories stay in `~/hearth/data/` and are preserved by updates. The launcher leaves a shared proxy running when Hearth stops. Its default app port is **8001**, automatically trying nearby free ports if necessary, so SillyTavern can keep using port 8000. The actual address is printed on startup.
 
-If SillyTavern is already using port 8000, use:
+To choose a port yourself:
 
 ```sh
-PORT=8001 npm start
+PORT=8002 hearth
 ```
 
-Then open http://127.0.0.1:8001. Hearth calls the proxy from its own backend, so no SillyTavern CORS setting or extension is required for Hearth.
+Hearth calls the proxy from its own backend, so no SillyTavern CORS setting or extension is required. Node 22+ is required; the app itself needs no dependency installation or build. The launcher requests Termux's wake lock when available; set `HEARTH_WAKE_LOCK=0` to skip it. Set `HEARTH_NO_BROWSER=1` to avoid opening a browser automatically.
 
 Android may pause or stop Termux in the background. Use Termux's wake lock and your device's battery settings if you want long-running generations. Saved story turns survive restarts; an interrupted turn is not partially committed.
+
+For an existing manual installation, run `bash scripts/termux-start.sh`, or start the proxy separately and run `PORT=8001 npm start`. Installer options: `HEARTH_DIR` sets the checkout location, `HEARTH_BIN_DIR` sets where the launcher is installed, and `HEARTH_NO_START=1` installs without starting. Rerunning the installer only fast-forwards its own repository and never replaces an unrelated checkout or command.
 
 ## Run on Windows
 

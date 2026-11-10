@@ -1,10 +1,11 @@
-import { mkdir, readFile, writeFile, rename, unlink, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, unlink, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { DEFAULT_SETTINGS, normalizeSettings } from './settings.mjs';
 
 export const makeId = () => randomUUID();
 export const clone = value => structuredClone(value);
+export const directoryIdentity = async directory => createHash('sha256').update(await realpath(directory)).digest('hex');
 export const branchWorld = branch => clone(branch.messages.at(-1)?.snapshot ?? branch.initialState);
 export const assertId = id => { if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw Object.assign(new Error('Invalid identifier.'),{status:400}); return id; };
 
