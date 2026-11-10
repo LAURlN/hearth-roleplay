@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createInitialState,runTurn,buildContextRequest,characterContext} from '../src/engine.mjs';
+import {createInitialState,runTurn,applyAuthoredMessage,applyVisualCorrection,buildContextRequest,characterContext} from '../src/engine.mjs';
 import {countMessages} from '../src/tokens.mjs';
 import {narratorProjection} from '../src/memory.mjs';
 import {semanticReply} from './helpers/semantic-fixture.mjs';
@@ -8,7 +8,7 @@ import {semanticReply} from './helpers/semantic-fixture.mjs';
 const settings={chatModel:'test-model',helperModel:'helper-model',maxResponders:3,contextTokenLimit:300000};
 const world=()=>createInitialState({location:'courtyard',persona:{name:'Pat',description:'A traveller in a coat.'},characters:[{name:'Ada',location:'courtyard'}]});
 const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
-function scripted({input,visual,perception,plan,actor,onRequest}={}){
+function scripted({input,visual,perception,plan,actor,edit,movement,onRequest}={}){
   const calls=[];
   const complete=async request=>{
     calls.push(request);onRequest?.(request);const system=request.messages[0].content,data=JSON.parse(request.messages[1].content);
@@ -18,6 +18,8 @@ function scripted({input,visual,perception,plan,actor,onRequest}={}){
     const semantic=semanticReply(request);if(semantic!==null)return semantic;
     if(system.includes('omniscient narrator/planner'))return JSON.stringify(plan?plan(data):{events:[],text:'The courtyard is quiet.',speakers:[]});
     if(system.includes('You play ONLY'))return JSON.stringify(actor?actor(data):{text:'Hello.',privateState:'',movement:null});
+    if(system.includes('independent movement helper'))return JSON.stringify(movement(data));
+    if(system.includes('A human has authored an edited'))return JSON.stringify(edit(data));
     if(system.includes('Summarize ONLY')||system.includes('private continuity notes'))return '{"summary":"An earlier conversation took place in the courtyard."}';
     if(system.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null}';
     if(system.includes('brief player-visible pause'))return '{"text":"A quiet moment passes."}';
@@ -83,6 +85,140 @@ test('newly perceived appearance facts produce visible narration after their kno
   const result=await runTurn({state,settings,complete:p.complete,input:null}),passage=result.messages.find(m=>m.text==='The visitor wears a red coat.');
   assert.ok(passage);assert.equal(passage.snapshot.characters[0].seenAppearance[ada.id].current[0].text,'red coat');
   assert.equal(result.messages.filter(m=>m.text==='The visitor wears a red coat.').length,1);
+});
+
+function movementWorld(){
+  const state=createInitialState({location:'yard',persona:{name:'Pat'},characters:[{name:'Ada',location:'yard'},{name:'Bea',location:'hall'},{name:'Cy',location:'gallery'}]});
+  state.locations.push('hall','gallery');
+  for(const c of state.characters)c.visual={initialized:true,revision:0,facts:c.name==='Ada'?[{key:'coat',layer:'presentation',text:'a red coat',visible:'a red coat'}]:[]};
+  return state;
+}
+function departureDescription(ada){
+  return (data,request)=>{
+    const result=JSON.parse(semanticReply(request));
+    // The first survey has no sight line; the departure opens it briefly.
+    if(!data.event)result.views.find(v=>v.observerId==='player').subjects=[];
+    if(data.event?.text==='Pat leaves yard.'||data.event?.text==='Ada leaves yard.'){
+      result.views.find(v=>v.observerId==='player').subjects=[{characterId:ada.id,keys:['coat']}];
+      result.description={text:'The visitor wears a red coat.',evidence:[{characterId:ada.id,key:'coat',excerpt:'a red coat'}]};
+    }
+    return result;
+  };
+}
+function assertResolvedCheckpoint(passage){
+  for(const event of passage.snapshot.events.filter(e=>e.type==='observation'&&(e.channel||'local')==='local')){
+    assert.ok(Array.isArray(event.perceptions),`Unresolved observation: ${event.text}`);
+    for(const delivery of event.perceptions){
+      assert.ok(event.recipients.includes(delivery.characterId));
+      assert.ok(passage.snapshot.characters.find(c=>c.id===delivery.characterId).knowledge.some(k=>k.eventId===event.id&&k.text===delivery.text));
+    }
+  }
+}
+
+for(const multiple of [false,true])test(`player appearance checkpoints follow their source and finish queued deliveries${multiple?' across sequential actions':''}`,async()=>{
+  const state=movementWorld(),ada=state.characters[1],bea=state.characters[2];
+  const first='I enter the hall.',second=' I enter the gallery.',input=first+(multiple?second:'');
+  const segments=[{kind:'action',text:first,destination:'hall',destinationEvidence:first},...(multiple?[{kind:'action',text:second,destination:'gallery',destinationEvidence:second}]:[])];
+  const perceive=departureDescription(ada);
+  const p=scripted({input:()=>({segments,correction:null,allowMajorTimeSkip:false}),perception:(data,request)=>{
+    if(data.event?.text==='Pat leaves hall.'){
+      assert.ok(data.world.characters.find(c=>c.id===bea.id).knowledge.some(k=>k.text===first));
+      assert.ok(!data.world.characters.find(c=>c.name==='Cy').knowledge.some(k=>k.text===first));
+    }
+    return perceive(data,request);
+  }});
+  const result=await runTurn({state,settings,complete:p.complete,input});
+  const appearance=result.messages.find(m=>m.appearanceDescription),source=result.messages.findIndex(m=>m.role==='player');
+  assert.ok(result.messages.indexOf(appearance)>source);
+  assertResolvedCheckpoint(appearance);
+  assert.equal(appearance.snapshot.location,multiple?'gallery':'hall');
+  assert.ok(appearance.snapshot.characters.find(c=>c.id===bea.id).knowledge.some(k=>k.text===first));
+  const rewind=scripted({plan:({world})=>{
+    assert.ok(world.characters.find(c=>c.id===bea.id).knowledge.some(k=>k.text===first));
+    return {events:[],text:'A pause.',speakers:[]};
+  }});
+  await runTurn({state:appearance.snapshot,messages:result.messages.slice(0,result.messages.indexOf(appearance)+1),settings,complete:rewind.complete,input:null});
+});
+
+for(const path of ['narrator','before','after','edit'])test(`appearance checkpoints finish movement observations on the ${path} path`,async()=>{
+  const state=movementWorld(),ada=state.characters[1],bea=state.characters[2];
+  const movement={type:'movement',characterId:ada.id,destination:'hall',mode:path==='edit'?'authored':'external',reason:'The open passage permits the crossing.',text:'Ada enters the hall.'};
+  const p=scripted({perception:departureDescription(ada),
+    plan:()=>({events:path==='narrator'?[movement]:[],text:'',speakers:path==='before'||path==='after'?[ada.id]:[]}),
+    actor:()=>({text:'',privateState:'',movement:{destination:'hall',reason:'I want to visit the hall.',when:path}}),
+    movement:()=>({allowed:true,text:movement.text,reason:movement.reason}),
+    edit:()=>({events:[movement],allowMajorTimeSkip:false}),
+  });
+  const result=path==='edit'?await applyAuthoredMessage({state,settings,complete:p.complete,message:{role:'character',characterId:ada.id,speaker:'An unseen voice',text:'Ada enters the hall.'}}):await runTurn({state,settings,complete:p.complete,input:null});
+  const appearance=result.messages.find(m=>m.appearanceDescription);
+  assert.ok(appearance);assertResolvedCheckpoint(appearance);
+  assert.equal(appearance.snapshot.characters.find(c=>c.id===ada.id).location,'hall');
+  assert.ok(appearance.snapshot.characters.find(c=>c.id===bea.id).knowledge.some(k=>k.text===movement.text));
+  const source=result.messages.findIndex(m=>path==='edit'?m.role==='character':m.sourceEventId&&m.text==='Ada leaves yard.');
+  assert.ok(source>=0&&source<result.messages.indexOf(appearance));
+});
+
+test('startup appearance notices retain narrator attribution when an edited character has a custom speaker',async()=>{
+  const state=movementWorld(),ada=state.characters[1],text='A short greeting.';
+  const p=scripted({perception:(data,request)=>{
+    const result=JSON.parse(semanticReply(request));
+    if(!data.previousPlayerViews[ada.id]?.current?.length)result.description={text:'A visitor wears a red coat.',evidence:[{characterId:ada.id,key:'coat',excerpt:'a red coat'}]};
+    return result;
+  },edit:()=>({events:[],allowMajorTimeSkip:false})});
+  const result=await applyAuthoredMessage({state,settings,complete:p.complete,message:{role:'character',characterId:ada.id,speaker:'An unseen voice',text}});
+  assert.equal(result.messages[0].speaker,'Narrator');
+  assert.equal(result.messages[0].appearanceDescription.evidence[0].key,'coat');
+  const authored=result.messages.find(m=>m.role==='character');
+  assert.equal(authored.text,text);assert.equal(authored.speaker,'An unseen voice');
+});
+
+test('visual correction appearance checkpoints follow the correction source',async()=>{
+  const state=movementWorld(),ada=state.characters[1];
+  const p=scripted({perception:(data,request)=>{
+    const result=JSON.parse(semanticReply(request)),coat=data.visualSubjects.find(c=>c.id===ada.id).facts.find(f=>f.key==='coat');
+    if(coat.text==='a green coat')result.description={text:'A visitor wears a green coat.',evidence:[{characterId:ada.id,key:'coat',excerpt:coat.text}]};
+    return result;
+  }});
+  const result=await applyVisualCorrection({state,settings,complete:p.complete,characterId:ada.id,facts:[{key:'coat',layer:'presentation',text:'a green coat',visible:'a green coat'}]});
+  const source=result.messages.findIndex(m=>m.visualCorrection),appearance=result.messages.find(m=>m.appearanceDescription);
+  assert.ok(source>=0&&source<result.messages.indexOf(appearance));assertResolvedCheckpoint(appearance);
+});
+
+test('pending movement appearance checkpoints retain later scheduled events at their own time',async()=>{
+  const state=movementWorld(),ada=state.characters[1];
+  state.pending=[
+    {type:'movement',at:5,characterId:ada.id,destination:'hall',mode:'external',reason:'An open passage.',text:'Ada enters the hall.'},
+    {type:'observation',at:8,location:'hall',text:'A bell rings.'},
+  ];
+  const p=scripted({perception:departureDescription(ada),plan:()=>({events:[{type:'time',minutes:10}],text:'',speakers:[]})});
+  const result=await runTurn({state,settings,complete:p.complete,input:null}),appearance=result.messages.find(m=>m.appearanceDescription);
+  assertResolvedCheckpoint(appearance);assert.equal(appearance.snapshot.time,5);
+  assert.equal(appearance.snapshot.pending.length,1);assert.equal(appearance.snapshot.pending[0].at,8);
+  assert.ok(!appearance.snapshot.events.some(e=>e.text==='A bell rings.'));
+  const rewind=scripted({plan:()=>({events:[{type:'time',minutes:5}],text:'',speakers:[]})});
+  const resumed=await runTurn({state:appearance.snapshot,messages:result.messages.slice(0,result.messages.indexOf(appearance)+1),settings,complete:rewind.complete,input:null});
+  assert.equal(resumed.state.pending.length,0);
+  assert.ok(resumed.state.characters.find(c=>c.name==='Bea').knowledge.some(k=>k.text==='A bell rings.'));
+});
+
+for(const path of ['narrator','character','edited narrator'])test(`appearance descriptions follow the ${path} prose that establishes them`,async()=>{
+  const state=movementWorld(),ada=state.characters[1],text='The visitor puts on a green coat.';
+  const p=scripted({visual:data=>({patches:[{characterId:ada.id,set:[{key:'coat',layer:'presentation',text:'a green coat',visible:'a green coat',sourceId:data.sources[0].id,excerpt:text}]}]}),
+    perception:(data,request)=>{
+      const result=JSON.parse(semanticReply(request));
+      if(!data.previousPlayerViews[ada.id]?.current?.length&&data.visualSubjects.find(c=>c.id===ada.id).facts.some(f=>f.text==='a green coat'))result.description={text:'A visitor wears a green coat.',evidence:[{characterId:ada.id,key:'coat',excerpt:'a green coat'}]};
+      return result;
+    },
+    plan:()=>({events:[],text:path==='narrator'?text:'',speakers:path==='character'?[ada.id]:[]}),
+    actor:()=>({text,privateState:'',movement:null}),edit:()=>({events:[],allowMajorTimeSkip:false}),
+  });
+  // A sight-line change lets the new outfit, rather than the startup coat,
+  // supply the first evidenced description.
+  ada.visual.facts=[];
+  const result=path==='edited narrator'?await applyAuthoredMessage({state,settings,complete:p.complete,message:{role:'narrator',speaker:'Stage voice',text}}):await runTurn({state,settings,complete:p.complete,input:null});
+  const source=result.messages.findIndex(m=>m.text===text),appearance=result.messages.find(m=>m.appearanceDescription);
+  assert.ok(appearance);assert.ok(source>=0&&source<result.messages.indexOf(appearance));assertResolvedCheckpoint(appearance);
+  if(path==='edited narrator')assert.equal(result.messages[source].speaker,'Stage voice');
 });
 
 test('characters retain their full permitted observations below their independent token budget',async()=>{

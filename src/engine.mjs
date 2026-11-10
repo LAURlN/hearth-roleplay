@@ -123,7 +123,15 @@ function message(state, role, text, characterId, extra = {}) {
   return { id: id(), role, ...(characterId ? { characterId } : {}), speaker: role === 'narrator' ? 'Narrator' : who?.name || 'You', text, createdAt: new Date().toISOString(), storyTime:state.time, eventCount:state.events.length, ...clone(extra), snapshot: clone(state) };
 }
 function describePerceptions(env,state,output){
-  env.onPerceivedDescription=(text,{eventId,evidence})=>output.push(message(state,'narrator',text,undefined,{...(eventId?{sourceEventId:eventId}:{}),appearanceDescription:{evidence:clone(evidence)}}));
+  const pending=[];
+  // A callback can run halfway through an ordered perception batch. Retain
+  // only validated prose/evidence until all deliveries and its source passage
+  // are committed; a saved passage must never lose still-queued observations.
+  env.onPerceivedDescription=(text,metadata)=>pending.push({text,...clone(metadata)});
+  env.flushDescriptions=()=>{
+    if(env.deferDescriptions)return;
+    for(const {text,eventId,evidence} of pending.splice(0))output.push(message(state,'narrator',text,undefined,{...(eventId?{sourceEventId:eventId}:{}),appearanceDescription:{evidence}}));
+  };
 }
 function remember(state, recipient, text, source, eventId, time=state.time) {
   // Sources are checked before delivery. A legitimate later utterance can
@@ -495,6 +503,7 @@ async function applyContinuityCorrection(env,state,correction){
     character(state,'player').location=correction.destination;state.location=correction.destination;
     log(state,{type:'placement_correction',characterId:'player',from,destination:correction.destination,sourceId:correction.sourceId,excerpt:correction.excerpt});
     env.semantics.survey();await env.semantics.flush();
+    env.flushDescriptions();
   }
 }
 
@@ -607,9 +616,9 @@ async function advanceClock(env,state,target,output,display){
       const event=state.pending.shift();check(event.type!=='time','Pending events must be instantaneous; use their absolute at time.');
       await enactPlan(env,state,{events:[event]},output,{display});
     }
-    exposure(state);await env.semantics.flush();
+    exposure(state);await env.semantics.flush();env.flushDescriptions();
   }
-  state.time=target;exposure(state);await env.semantics.flush();
+  state.time=target;exposure(state);await env.semantics.flush();env.flushDescriptions();
 }
 
 async function enactPlan(env, state, plan, output, { display = true } = {}) {
@@ -631,12 +640,14 @@ async function enactPlan(env, state, plan, output, { display = true } = {}) {
     // earlier message's snapshot. Editorial narration itself teaches nobody.
     const perceived=state.events.slice(eventStart).filter(e=>e.type==='observation').flatMap(e=>(e.perceptions??((e.channel||'local')!=='local'&&e.recipients.includes('player')?[{characterId:'player',text:e.text}]:[])).filter(p=>p.characterId==='player').map(p=>({event:e,delivery:p})));
     if(display&&!['background','publication','invitation','activity'].includes(event.type))for(const {event:source,delivery} of perceived)output.push(message(state,'narrator',delivery.text,undefined,{sourceEventId:source.id}));
+    env.flushDescriptions();
   }
   if (plan.text?.trim()) {
     const visualText=plan.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim();
     await syncVisuals(state,env,{sources:visualText?[{id:`narration:${id()}`,kind:'narration',text:visualText,time:state.time}]:[]});
     env.semantics.survey();await env.semantics.flush();
     if(display)output.push(message(state, 'narrator', plan.text));
+    env.flushDescriptions();
   }
 }
 
@@ -667,6 +678,7 @@ async function resolveMovement(env, state, who, intent, output) {
   await syncVisuals(state,env,{sources:visualEventSources(state.events.slice(eventStart))});
   await env.semantics.flush();
   for(const source of state.events.slice(eventStart).filter(e=>e.type==='observation'))for(const delivery of source.perceptions||[])if(delivery.characterId==='player')output.push(message(state,'narrator',delivery.text,undefined,{sourceEventId:source.id}));
+  env.flushDescriptions();
   return result.allowed;
 }
 
@@ -700,6 +712,7 @@ async function prepareVisuals(state,env,history) {
   ]:[];
   await syncVisuals(state,env,{sources});
   env.semantics.survey();await env.semantics.flush();
+  env.flushDescriptions();
 }
 
 export async function applyVisualCorrection(options) {
@@ -710,7 +723,8 @@ export async function applyVisualCorrection(options) {
   env.semantics.survey();await env.semantics.flush();
   const subject=character(state,options.characterId);
   const corrected=message(state,'narrator',`Appearance corrected for ${subject.name}.`,undefined,{visualCorrection:{characterId:subject.id,facts:clone(options.facts)}});
-  return {state:clone(state),messages:[...output,corrected]};
+  output.push(corrected);env.flushDescriptions();
+  return {state:clone(state),messages:output};
 }
 
 export function applyCharacterPrompt({state:original,characterId,systemPrompt}) {
@@ -734,8 +748,10 @@ export async function runTurn(options) {
   if (options.input !== null && options.input !== undefined) {
     const input = string(options.input, 'player input');
     const interpretation=await preparePlayerStart(env,state,history,input);
+    env.deferDescriptions=true;
     await applyPlayer(state, input, interpretation,env);
     output.push(message(state, 'player', input, 'player', { segments: interpretation.segments }));
+    env.deferDescriptions=false;env.flushDescriptions();
   } else {await prepareVisuals(state,env,history);await resolvePlayerPlacement(env,state,history);}
   env.allowMajorTimeSkip = state.playerIntent?.allowMajorTimeSkip === true;
   const intent = clone(state.playerIntent || {});
@@ -766,6 +782,7 @@ export async function runTurn(options) {
       const delivery=observed.perceptions?.find(p=>p.characterId==='player');
       if(delivery)output.push(message(state,'character',delivery.text,who.id,{speaker:delivery.speaker,sourceEventId:observed.id}));
       else if((response.channel||'local')!=='local'&&observed.recipients.includes('player'))output.push(message(state,'character',response.text,who.id,{sourceEventId:observed.id}));
+      env.flushDescriptions();
     }
     if (response.movement?.when === 'after') await resolveMovement(env, state, who, response.movement, output);
   }
@@ -788,12 +805,15 @@ export async function applyAuthoredMessage(options) {
   env.history=narratorHistory(options.messages || [],state);
   const output = [];
   describePerceptions(env,state,output);
+  let authoredPassage;
   if (authored.role === 'player') {
     const interpretation=await preparePlayerStart(env,state,options.messages||[],authored.text);
+    env.deferDescriptions=true;
     await applyPlayer(state, authored.text, interpretation,env);
-    output.push(message(state, 'player', authored.text, 'player', { segments: interpretation.segments }));
+    authoredPassage=message(state, 'player', authored.text, 'player', { segments: interpretation.segments });
   } else {
     await prepareVisuals(state,env,options.messages||[]);
+    env.deferDescriptions=true;
     protectPrivateInputs(state, authored.text);
     if (authored.role === 'character') {
       character(state, authored.characterId);
@@ -817,9 +837,11 @@ export async function applyAuthoredMessage(options) {
       env.semantics.survey();await env.semantics.flush();
     }
     if (authored.role === 'character' && plan.privateState !== undefined) character(state, authored.characterId).privateState = plan.privateState;
-    output.push(message(state, authored.role, authored.text, authored.role === 'character' ? authored.characterId : undefined));
+    authoredPassage=message(state, authored.role, authored.text, authored.role === 'character' ? authored.characterId : undefined);
   }
-  if (authored.speaker) output[0].speaker = authored.speaker;
+  if (authored.speaker) authoredPassage.speaker = authored.speaker;
+  output.push(authoredPassage);
+  env.deferDescriptions=false;env.flushDescriptions();
   aborted(env.signal);
   return { state: clone(state), messages: clone(output) };
 }
