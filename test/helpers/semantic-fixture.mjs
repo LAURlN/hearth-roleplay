@@ -4,11 +4,15 @@
 import {createHash} from 'node:crypto';
 export function semanticReply(request){
   const system=request.messages[0].content;
+  if(system.includes('PLAYER PASSAGE PRESENTER')){
+    const {contributions}=JSON.parse(request.messages[1].content);
+    return JSON.stringify({parts:contributions.map(m=>({text:m.text,sourceMessageIds:[m.id],evidence:[{messageId:m.id,excerpt:m.text}],spoken:[]})),omitted:[],faithful:true});
+  }
   if(!/PERCEPTION HELPER|PUBLIC AWARENESS HELPER|REACTIVE TURN SCHEDULER/.test(system))return null;
   const data=JSON.parse(request.messages[1].content),world=data.world;
   if(system.includes('REACTIVE TURN SCHEDULER'))return JSON.stringify({nextCharacterId:data.suggestions[data.called.length]??null,yieldToPlayer:false,reason:'Scripted fixture order.'});
   if(system.includes('PUBLIC AWARENESS HELPER'))return JSON.stringify({decisions:data.candidates.map(c=>{
-    const pub=c.publication,who=world.characters.find(p=>p.id===c.characterId),audience=pub.audience;
+    const pub=c.publication??world.publications.find(p=>p.id===c.publicationId),who=world.characters.find(p=>p.id===c.characterId),audience=pub.audience;
     const eligible=audience.type==='online'?who.online.access&&(!audience.characterIds?.length||audience.characterIds.includes(who.id)):audience.locations.includes(who.location);
     const connected=who.id===pub.authorId||who.online.connections.includes(pub.authorId)||who.online.connections.includes(world.characters.find(p=>p.id===pub.authorId)?.name);
     const relevant=(audience.interests||[]).some(i=>who.online.interests.includes(i));

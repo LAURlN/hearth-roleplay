@@ -48,9 +48,9 @@ export function refreshVisualWitnesses(state) {
   for(const subject of state.characters)if(subject.location!=='Opening location')perceive(state,subject,state.characters.filter(c=>c.location===subject.location));
 }
 
-export function visualContext(state,observerId) {
+export function visualContext(state,observerId,{includeRemembered=true}={}) {
   const observer=who(state,observerId);
-  return state.characters.filter(c=>c.id!==observerId&&(state.perceptionMode==='helper'?observer.visibleCharacters?.includes(c.id):c.location===observer.location)).map(c=>({id:c.id,name:c.name,appearance:observer.visual?.canSee===false?'':seen(observer,c.id)?.current?.map(f=>f.text).join('; ')??'',rememberedAppearance:copy(seen(observer,c.id)?.facts??[])}));
+  return state.characters.filter(c=>c.id!==observerId&&(state.perceptionMode==='helper'?observer.visibleCharacters?.includes(c.id):c.location===observer.location)).map(c=>({id:c.id,name:c.name,appearance:observer.visual?.canSee===false?'':seen(observer,c.id)?.current?.map(f=>f.text).join('; ')??'',...(includeRemembered?{rememberedAppearance:copy(seen(observer,c.id)?.facts??[])}:{})}));
 }
 
 export function applyPerceivedViews(state,world,views,sourceId) {

@@ -59,7 +59,7 @@ export class Store {
   async list() {
     const names=await readdir(path.join(this.directory,'stories'));
     const results=await Promise.all(names.filter(x=>x.endsWith('.json')).map(async name=>{
-      try { const s=await this.get(name.slice(0,-5)); return {id:s.id,title:s.title,archived:s.archived===true,version:s.version,updatedAt:s.updatedAt,messageCount:s.branches[s.activeBranchId].messages.length,branchCount:Object.keys(s.branches).length}; }
+      try { const s=await this.get(name.slice(0,-5)); return {id:s.id,title:s.title,archived:s.archived===true,version:s.version,updatedAt:s.updatedAt,messageCount:s.branches[s.activeBranchId].messages.filter(m=>!m.internal).length,branchCount:Object.keys(s.branches).length}; }
       catch { return null; }
     }));
     return results.filter(Boolean).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
@@ -85,5 +85,9 @@ export class Store {
 
 export function publicStory(story,busy={}) {
   const branch=story.branches[story.activeBranchId];
-  return {id:story.id,title:story.title,archived:Boolean(story.archived),setup:story.setup,createdAt:story.createdAt,updatedAt:story.updatedAt,version:story.version,activeBranchId:story.activeBranchId,branches:Object.values(story.branches).map(b=>({id:b.id,name:b.name,parentId:b.parentId,forkMessageId:b.forkMessageId,messageCount:b.messages.length,createdAt:b.createdAt})),branch:{id:branch.id,name:branch.name,messages:branch.messages.map(({snapshot,...message})=>message),illustrations:branch.illustrations},world:branchWorld(branch),busy:Boolean(busy.controller),stage:busy.stage??'',illustrationJob:story.illustrationJob};
+  const responses=branch.responses?.map(response=>{
+    const first=branch.messages.findIndex(m=>m.id===response.sourceMessageIds[0]);
+    return {...clone(response),afterMessageId:branch.messages.slice(0,first).findLast(m=>!m.internal)?.id??null};
+  });
+  return {id:story.id,title:story.title,archived:Boolean(story.archived),setup:story.setup,createdAt:story.createdAt,updatedAt:story.updatedAt,version:story.version,activeBranchId:story.activeBranchId,branches:Object.values(story.branches).map(b=>({id:b.id,name:b.name,parentId:b.parentId,forkMessageId:b.forkMessageId,messageCount:b.messages.filter(m=>!m.internal).length,createdAt:b.createdAt})),branch:{id:branch.id,name:branch.name,messages:branch.messages.filter(m=>!m.internal).map(({snapshot,...message})=>message),...(responses!==undefined?{responses}:{}),illustrations:branch.illustrations},world:branchWorld(branch),busy:Boolean(busy.controller),stage:busy.stage??'',illustrationJob:story.illustrationJob};
 }

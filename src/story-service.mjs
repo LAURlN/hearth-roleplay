@@ -5,9 +5,10 @@ import { createProvider } from './provider.mjs';
 import { Illustrator } from './illustrator.mjs';
 import { compactKnowledge,narratorProjection,contextUsage } from './memory.mjs';
 import { loggedProvider,formatDebugLog,appendDebugError } from './debug-log.mjs';
+import {composeResponse,retainResponses,validateResponses} from './presentation.mjs';
 
 const failure=(message,status=400,code)=>Object.assign(new Error(message),{status,code});
-const transcript=messages=>messages.map(({snapshot,...message})=>({...message,storyTime:message.storyTime??snapshot?.time,eventCount:snapshot?.events?.length??message.eventCount}));
+const transcript=messages=>messages.filter(m=>!m.internal).map(({snapshot,...message})=>({...message,storyTime:message.storyTime??snapshot?.time,eventCount:snapshot?.events?.length??message.eventCount}));
 function text(value,name,limit=60000,empty=false) { if(typeof value!=='string'||(!empty&&!value.trim())||value.length>limit) throw failure(`Invalid ${name}.`);return value; }
 export function validateSetup(input) {
   if(!input||typeof input!=='object'||Array.isArray(input)) throw failure('Invalid story setup.');
@@ -66,12 +67,12 @@ export class StoryService {
         message.content=JSON.stringify(payload);
       }
       return provider.complete({...request,messages:prepared});
-    },signal:lease.controller.signal,onStage:stage=>{lease.stage=stage;}};
+    },unifiedPresentation:true,signal:lease.controller.signal,onStage:stage=>{lease.stage=stage;}};
   }
   async create(input) {
     const setup=validateSetup(input),id=makeId(),branchId=makeId(),createdAt=new Date().toISOString();
     const initialState=createInitialState(setup);
-    const story={id,title:setup.title,setup,createdAt,updatedAt:createdAt,version:0,activeBranchId:branchId,branches:{[branchId]:{id:branchId,name:'Original',parentId:null,forkMessageId:null,createdAt,initialState,messages:[],illustrations:[]}}};
+    const story={id,title:setup.title,setup,createdAt,updatedAt:createdAt,version:0,activeBranchId:branchId,branches:{[branchId]:{id:branchId,name:'Original',parentId:null,forkMessageId:null,createdAt,initialState,messages:[],responses:[],illustrations:[]}}};
     // Save the setup first: a failed connection does not lose the user's authored premise.
     await this.store.put(story);
     try {return await this.turn(id,0,null);} catch(error) {error.storyId=id;throw error;}
@@ -104,6 +105,8 @@ export class StoryService {
       const state=await compactKnowledge(branchWorld(branch),{...env,messages:transcript(branch.messages),buildRequest:buildContextRequest});
       const result=await runTurn({...env,state,messages:transcript(branch.messages),input});
       branch.messages.push(...result.messages);
+      const response=await composeResponse(result.messages,env);
+      if(response)(branch.responses??=[]).push(response);
     });
   }
   async branch(id,input) {
@@ -114,6 +117,7 @@ export class StoryService {
       const old=story.branches[story.activeBranchId];
       const index=input.messageId?old.messages.findIndex(m=>m.id===input.messageId):-1;
       if((input.messageId&&index<0)||(!input.messageId&&mode!=='rewind')) throw failure('Message not found.',404);
+      if(mode!=='rewind'&&old.messages[index].internal)throw failure('Internal checkpoints cannot be edited or deleted.');
       const retainedCount=mode==='rewind'?index+1:index;
       const messages=clone(old.messages.slice(0,retainedCount));
       let state=clone(messages.at(-1)?.snapshot??old.initialState);
@@ -122,6 +126,8 @@ export class StoryService {
       env.traceContext.parentBranchId=old.id;
       env.traceContext.anchorMessageId=input.messageId;
       const branch={id:newId,name:`${mode==='edit'?'Revision':mode==='delete'?'Without passage':'Continuation'} ${Object.keys(story.branches).length}`,parentId:old.id,forkMessageId:input.messageId??null,createdAt:new Date().toISOString(),initialState:clone(old.initialState),messages,illustrations:clone(old.illustrations.filter(image=>messages.some(m=>m.id===image.anchorMessageId)))};
+      const retained=retainResponses(old.responses,messages);if(retained!==undefined)branch.responses=retained;
+      const revisionStart=messages.length;
       if(mode==='edit') {
         const edited={...clone(old.messages[index]),id:makeId(),text:input.text,createdAt:new Date().toISOString()};delete edited.snapshot;
         const result=await applyAuthoredMessage({...env,state,messages:transcript(messages),message:edited});
@@ -132,6 +138,8 @@ export class StoryService {
         const continuation=await runTurn({...env,state,messages:transcript(branch.messages),input:null});
         branch.messages.push(...continuation.messages);
       }
+      const response=await composeResponse(branch.messages.slice(revisionStart),env);
+      if(response)(branch.responses??=[]).push(response);
       story.branches[newId]=branch;story.activeBranchId=newId;
       story.illustrationJob={status:'cancelled'};
     },{illustrate:mode!=='rewind'||input.regenerate===true,interruptImages:true});
@@ -217,8 +225,11 @@ export class StoryService {
       const messages=new Set();
       for(const m of branch.messages) {
         if(++count>10000||typeof m.id!=='string'||messages.has(m.id)||!['player','character','narrator'].includes(m.role)||typeof m.speaker!=='string') throw failure('Invalid imported message.');
-        text(m.text,'imported message');validateWorld(m.snapshot);messages.add(m.id);
+        if(m.internal!==undefined&&typeof m.internal!=='boolean')throw failure('Invalid imported internal checkpoint.');
+        if(m.internal===true&&(m.role!=='narrator'||m.text!==''))throw failure('Invalid imported internal checkpoint.');
+        text(m.text,'imported message',60000,m.internal===true);validateWorld(m.snapshot);messages.add(m.id);
       }
+      try{validateResponses(branch);}catch(error){throw failure(error.message);}
       for(const image of branch.illustrations) {
         if(typeof image.id!=='string'||typeof image.url!=='string'||!messages.has(image.anchorMessageId)||typeof image.prompt!=='string') throw failure('Invalid imported illustration.');
         if(!urls.has(image.url)) {

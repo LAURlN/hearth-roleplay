@@ -226,7 +226,7 @@
   }
   function upsertSummary(story) {
     const summary = { id: story.id, title: story.title, archived:Boolean(story.archived), version:story.version, updatedAt: story.updatedAt,
-      messageCount: story.branch.messages.length, branchCount: story.branches.length };
+      messageCount: story.branch.messages.filter(message => !message.internal).length, branchCount: story.branches.length };
     const index = state.stories.findIndex((item) => item.id === story.id);
     if (index < 0) state.stories.unshift(summary);
     else state.stories[index] = summary;
@@ -292,7 +292,7 @@
     $('branch-label').textContent = story.branch.name || 'Branches';
     $('open-branches').title = `Branches · ${story.branch.name}`;
     hide('story-tools', false); hide('welcome'); hide('conversation', false); hide('writing-area', false);
-    const key = JSON.stringify([story.activeBranchId, story.branch.messages, story.branch.illustrations]);
+    const key = JSON.stringify([story.activeBranchId, story.branch.messages, story.branch.responses, story.branch.illustrations]);
     if (key !== state.transcriptKey) {
       state.transcriptKey = key;
       renderTranscript();
@@ -305,44 +305,108 @@
   }
   function renderTranscript() {
     const container = $('conversation');
-    const focusedMessage = document.activeElement?.dataset?.messageAction;
+    const pane = $('reading-pane');
+    const scrollTop = pane.scrollTop;
+    const focusKey = element => element?.dataset?.transcriptFocus;
+    const focusedControl = focusKey(document.activeElement);
+    const menuReturn = focusKey(focusBeforeDialog.get($('message-dialog')));
+    const expanded = new Set([...container.querySelectorAll('[data-response-details]')]
+      .filter(element => element.open).map(element => element.dataset.responseDetails));
     container.replaceChildren(node('div', 'story-prologue', 'A story in the making'));
-    const messages = state.story.branch.messages || [];
-    if (!messages.length) container.append(node('p', 'empty-note', 'The page is yours. Write a beginning, or choose Continue to let the narrator open the story.'));
-    for (const message of messages) {
-      const article = node('article', 'message');
-      article.dataset.role = message.role;
-      article.dataset.messageId = message.id;
-      const header = node('div', 'message-header');
-      const dot = node('span', 'speaker-dot'); dot.setAttribute('aria-hidden', 'true');
-      const name = message.speaker || (message.role === 'player' ? 'You' : 'Narrator');
-      const menu = button('···', 'icon-button message-menu', () => openMessageMenu(message.id));
-      menu.setAttribute('aria-label', `Options for ${name}’s passage`);
-      menu.setAttribute('aria-haspopup', 'dialog');
-      menu.dataset.messageAction = message.id;
-      const time = node('time', 'message-time', dateLabel(message.createdAt, true));
-      if (Number.isFinite(Date.parse(message.createdAt))) time.dateTime = message.createdAt;
-      header.append(dot, node('span', 'speaker-name', name), time, menu);
-      article.append(header, node('div', 'message-text', message.text));
-      const images = (state.story.branch.illustrations || []).filter((image) => image.anchorMessageId === message.id);
-      if (images.length) {
-        const row = node('div', 'message-images');
-        for (const record of images) {
-          const card = button('', 'message-image', () => openImage(record.id));
-          card.setAttribute('aria-label', `View illustration: ${record.caption || 'Story moment'}`);
-          card.append(makeImage(record), node('span', '', record.caption || 'A moment, illustrated'));
-          row.append(card);
-        }
-        article.append(row);
+    const messages = (state.story.branch.messages || []).filter(message => !message.internal);
+    const groups = new Map(), grouped = new Set(), hiddenOnlyGroups = new Map();
+    // Presentation records refer to canonical originals. Their final checkpoint
+    // may be internal, so place each group at its last visible contribution.
+    for (const response of state.story.branch.responses || []) {
+      const sourceIds = new Set(response.sourceMessageIds || []);
+      const originals = messages.filter(message => message.role !== 'player' && sourceIds.has(message.id) && !grouped.has(message.id));
+      if (!response.text) continue;
+      const group = { response, originals, sourceIds };
+      if (originals.length) groups.set(originals.at(-1).id, group);
+      else {
+        // The server supplies the preceding visible canonical boundary for a
+        // response whose only source is a hidden checkpoint. Array order keeps
+        // consecutive quiet responses at that same boundary chronological.
+        const after = response.afterMessageId ?? null;
+        if (!hiddenOnlyGroups.has(after)) hiddenOnlyGroups.set(after, []);
+        hiddenOnlyGroups.get(after).push(group);
       }
+      originals.forEach(message => grouped.add(message.id));
+    }
+    function appendGroup({ response, originals, sourceIds }) {
+      const article = renderPassage({ ...response, role: 'narrator', speaker: 'Story' }, true);
+      article.dataset.responseId = response.id;
+      if (originals.length) {
+        const details = node('details', 'response-originals');
+        details.dataset.responseDetails = response.id;
+        details.open = expanded.has(response.id);
+        const summary = node('summary', '', `Original contributions (${originals.length})`);
+        summary.dataset.transcriptFocus = `details:${response.id}`;
+        details.append(summary, node('p', 'originals-hint', 'Copy, edit, delete or continue from an individual contribution.'));
+        const list = node('div', 'response-contributions');
+        originals.forEach(original => list.append(renderPassage(original)));
+        details.append(list);
+        article.append(details);
+      }
+      appendPassageImages(article, image => sourceIds.has(image.anchorMessageId));
       container.append(article);
     }
-    updateMessageControls();
-    if (focusedMessage && !document.querySelector('dialog[open]')) {
-      const focusedButton = [...container.querySelectorAll('[data-message-action]')]
-        .find((element) => element.dataset.messageAction === focusedMessage);
-      focusedButton?.focus({ preventScroll: true });
+    function appendHiddenGroups(after) {
+      for (const group of hiddenOnlyGroups.get(after) || []) appendGroup(group);
     }
+    if (!messages.length && !hiddenOnlyGroups.size) container.append(node('p', 'empty-note', 'The page is yours. Write a beginning, or choose Continue to let the narrator open the story.'));
+    appendHiddenGroups(null);
+    for (const message of messages) {
+      const group = groups.get(message.id);
+      if (group) appendGroup(group);
+      else if (!grouped.has(message.id)) {
+        const article = renderPassage(message);
+        appendPassageImages(article, image => image.anchorMessageId === message.id);
+        container.append(article);
+      }
+      appendHiddenGroups(message.id);
+    }
+    updateMessageControls();
+    const controls = [...container.querySelectorAll('[data-transcript-focus]')];
+    if (menuReturn) {
+      const replacement = controls.find(element => focusKey(element) === menuReturn);
+      if (replacement) focusBeforeDialog.set($('message-dialog'), replacement);
+    }
+    if (focusedControl && !document.querySelector('dialog[open]')) {
+      controls.find(element => focusKey(element) === focusedControl)?.focus({ preventScroll: true });
+    }
+    pane.scrollTop = scrollTop;
+  }
+  function renderPassage(message, combined = false) {
+    const article = node('article', combined ? 'message combined-response' : 'message');
+    article.dataset.role = message.role;
+    if (!combined) article.dataset.messageId = message.id;
+    const header = node('div', 'message-header');
+    const dot = node('span', 'speaker-dot'); dot.setAttribute('aria-hidden', 'true');
+    const name = message.speaker || (message.role === 'player' ? 'You' : 'Narrator');
+    const menu = button('···', 'icon-button message-menu', () => combined ? openResponseMenu(message.id) : openMessageMenu(message.id));
+    menu.setAttribute('aria-label', combined ? 'Options for the combined story passage' : `Options for ${name}’s passage`);
+    menu.setAttribute('aria-haspopup', 'dialog');
+    menu.dataset.transcriptFocus = `${combined ? 'response' : 'message'}:${message.id}`;
+    if (!combined) menu.dataset.messageAction = message.id;
+    const time = node('time', 'message-time', dateLabel(message.createdAt, true));
+    if (Number.isFinite(Date.parse(message.createdAt))) time.dateTime = message.createdAt;
+    header.append(dot, node('span', 'speaker-name', name), time, menu);
+    article.append(header, node('div', 'message-text', message.text));
+    return article;
+  }
+  function appendPassageImages(article, matches) {
+    const images = (state.story.branch.illustrations || []).filter(matches);
+    if (!images.length) return;
+    const row = node('div', 'message-images');
+    for (const record of images) {
+      const card = button('', 'message-image', () => openImage(record.id));
+      card.setAttribute('aria-label', `View illustration: ${record.caption || 'Story moment'}`);
+      card.dataset.transcriptFocus = `image:${record.id}`;
+      card.append(makeImage(record), node('span', '', record.caption || 'A moment, illustrated'));
+      row.append(card);
+    }
+    article.append(row);
   }
   function updateMessageControls() {
     // Copy remains available during generation; mutating options are gated in the menu.
@@ -522,11 +586,13 @@
     $('syntax-help').setAttribute('aria-expanded', String(show));
   });
   function regenerationBoundary() {
-    const messages = state.story?.branch.messages || [];
-    if (!messages.some((message) => message.role !== 'player')) return null;
+    const messages = (state.story?.branch.messages || []).filter(message => !message.internal);
+    const responses = state.story?.branch.responses || [];
+    if (!responses.length && !messages.some((message) => message.role !== 'player')) return null;
     let index = messages.length - 1;
     while (index >= 0 && messages[index].role !== 'player') index--;
-    if (index === messages.length - 1) return null;
+    const playerBoundary = index >= 0 ? messages[index].id : null;
+    if (index === messages.length - 1 && !responses.some(response => response.afterMessageId === playerBoundary)) return null;
     return { messageId: index >= 0 ? messages[index].id : undefined };
   }
   $('regenerate').addEventListener('click', () => {
@@ -535,13 +601,25 @@
   });
 
   function openMessageMenu(id) {
-    state.message = state.story?.branch.messages.find((message) => message.id === id);
+    state.message = state.story?.branch.messages.find((message) => message.id === id && !message.internal);
     if (!state.message) return;
     $('message-menu-title').textContent = `${state.message.speaker || 'Passage'} · Options`;
     updateMenuControls();
     openDialog('message-dialog');
   }
+  function openResponseMenu(id) {
+    const response = state.story?.branch.responses?.find(item => item.id === id);
+    if (!response) return;
+    state.message = { ...response, id: response.anchorMessageId, combined: true };
+    $('message-menu-title').textContent = 'Story passage · Options';
+    updateMenuControls();
+    openDialog('message-dialog');
+  }
   function updateMenuControls() {
+    const combined = Boolean(state.message?.combined);
+    // Edits and deletions must keep each author's canonical boundary intact.
+    ['edit-message', 'delete-message', 'illustrate-message'].forEach(id => hide(id, combined));
+    $('copy-message').textContent = combined ? 'Copy passage ↗' : 'Copy text ↗';
     ['edit-message', 'delete-message', 'rewind-message'].forEach((id) => { $(id).disabled = locked(); });
     $('illustrate-message').disabled = locked() || imageActive();
   }
@@ -563,10 +641,11 @@
       else { toast('Clipboard access is unavailable. Select and copy the text below.'); }
     }
   });
-  $('edit-message').addEventListener('click', () => openRevision('edit', state.message?.id));
-  $('delete-message').addEventListener('click', () => openRevision('delete', state.message?.id));
+  $('edit-message').addEventListener('click', () => { if (!state.message?.combined) openRevision('edit', state.message?.id); });
+  $('delete-message').addEventListener('click', () => { if (!state.message?.combined) openRevision('delete', state.message?.id); });
   $('rewind-message').addEventListener('click', () => openRevision('rewind', state.message?.id));
   $('illustrate-message').addEventListener('click', () => {
+    if (state.message?.combined) return;
     const messageId = state.message?.id;
     closeDialog('message-dialog');
     mutateStory('/illustrate', { messageId }, { onSuccess: () => toast('Illustration requested. You can keep writing.') });
@@ -1304,7 +1383,7 @@
       state.settings = data.settings;
       state.stories = data.stories || [];
       state.booted = true;
-      $('app-version').textContent = data.version || '1.0.0';
+      $('app-version').textContent = data.version || '1.2.0';
       populateSettings(); renderLibrary(); updateControls();
       const lastId = storage.get('last-story');
       if (lastId && state.stories.some((story) => story.id === lastId)) await selectStory(lastId);

@@ -56,21 +56,21 @@ export class Illustrator {
     let stage='Illustrator is deciding';
     const context=()=>({storyId,branchId:job.branchId,anchorMessageId:job.anchorMessageId,turnId:job.id,stage});
     try {
-      const provider=loggedProvider(this.makeProvider(settings),{store:this.store,settings,getContext:context});
       const world=branch.messages[index].snapshot??branchWorld(branch);
       const retained=new Set(branch.messages.slice(0,index+1).map(m=>m.id));
       const history=branch.illustrations.filter(image=>retained.has(image.anchorMessageId));
+      const priorIndex=history.length?branch.messages.findIndex(m=>m.id===history.at(-1).anchorMessageId):-1;
+      const turnsSince=branch.messages.slice(priorIndex+1,index+1).filter(m=>m.role==='player').length;
+      const coolingDown=!manual&&history.length>0&&turnsSince<settings.imageCooldown;
+      if(coolingDown){await this.update(storyId,job,{status:'skipped',reason:'Automatic illustration is cooling down.'});return;}
+      const provider=loggedProvider(this.makeProvider(settings),{store:this.store,settings,getContext:context});
       const scene=world.characters.filter(c=>c.location===world.location).map(({id,name,appearance,description,visual})=>({id,name,appearance,description,visual}));
       // Narrator prose can establish visual details without becoming a person's
       // observation. Read only passages at/before this illustration's anchor.
       const retainedMessages=branch.messages.slice(0,index+1),memory=world.narratorMemory;
       const memoryIndex=memory?.throughMessageId?retainedMessages.findIndex(m=>m.id===memory.throughMessageId):-1;
-      const narration=retainedMessages.slice(memoryIndex>=0?memoryIndex+1:memory?.throughMessages??0).filter(m=>m.role==='narrator').map(({id,text,storyTime})=>({id,text:text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim(),storyTime})).filter(m=>m.text);
+      const narration=retainedMessages.slice(memoryIndex>=0?memoryIndex+1:memory?.throughMessages??0).filter(m=>m.role==='narrator'&&!m.internal).map(({id,text,storyTime})=>({id,text:text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim(),storyTime})).filter(m=>m.text);
       const player=world.characters.find(c=>c.id==='player');
-      const currentIndex=index;
-      const priorIndex=history.length?branch.messages.findIndex(m=>m.id===history.at(-1).anchorMessageId):-1;
-      const turnsSince=branch.messages.slice(priorIndex+1,currentIndex+1).filter(m=>m.role==='player').length;
-      const coolingDown=!manual&&history.length>0&&turnsSince<settings.imageCooldown;
       const initialRefs=referencesFor(history,[],scene.map(c=>c.id));
       const referenceFiles=await Promise.all(initialRefs.map(async image=>({image,bytes:await this.store.image(image.url)})));
       const content=[{type:'text',text:JSON.stringify({manual,coolingDown,time:world.timeLabel,location:world.location,characters:scene,continuity:memory?.summary??'',narration,observations:(player?.knowledge??[]).slice(-30),history:history.slice(-24).map(({id,prompt,caption,characterIds,appearanceNotes})=>({id,prompt,caption,characterIds,appearanceNotes})),referenceImageOrder:initialRefs.map(image=>image.id)})}];

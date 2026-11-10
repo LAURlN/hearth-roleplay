@@ -50,6 +50,8 @@ const ACTOR_INSTRUCTION=`You play ONLY the supplied character. Your entire permi
 
 class RefusalError extends Error {}
 function requestMessages(env,instruction,payload,{actor}={}){
+  payload=clone(payload);
+  for(const key of ['world','state','establishedWorld'])if(payload[key]?.characters&&payload[key]?.events)payload[key]=narratorProjection(payload[key]);
   const actingRules=actor?`Shared character system prompt:\n${env.settings.characterPrompt??CHARACTER_PROMPT}\n\n${actor.systemPrompt?.trim()?`Character-specific system prompt:\n${actor.systemPrompt}\n\n`:''}`:'';
   return [
     { role: 'system', content: `${env.settings.roleplayPrompt || 'Tell a coherent roleplay story with independent character agency.'}\n\n${actingRules}${instruction}\nRecipient convention: ordinary observable LOCAL speech/actions omit recipients or use []; both ask the perception helper to evaluate plausible witnesses, including nearby locations. A nonempty list intentionally restricts who can perceive it (for example, a whisper). Remote phone/online messages require explicit nonempty recipients. Thoughts/OOC remain private regardless of recipient fields. Put actual spoken replies in text; an empty text field means deliberately saying/doing nothing observable.\nReturn ONLY a JSON object. No Markdown, commentary, or response_format dependency. If you must refuse, return {"refusal":"reason"}.` },
@@ -113,7 +115,7 @@ export function characterContext(state, characterId) {
     sharedBackground: state.sharedBackground || [],
     memory: self.memory ? { summary: self.memory.summary, through: self.memory.through, time: self.memory.time } : null,
     knowledge: self.knowledge.slice(self.memory?.through ?? 0),
-    nearby: visualContext(state,characterId),
+    nearby: visualContext(state,characterId,{includeRemembered:false}),
     rememberedAppearances:Object.fromEntries(Object.entries(self.seenAppearance||{}).map(([target,{name,facts,current,time,location}])=>[target,{name,facts,current,time,location}])),
   });
 }
@@ -387,7 +389,7 @@ function narratorHistory(messages, state) {
   const seen=new Set();messages=messages.filter(m=>{if(!m.id)return true;if(seen.has(m.id))return false;seen.add(m.id);return true;});
   const memory=state?.narratorMemory;
   const boundary=memory?.throughMessageId?messages.findIndex(m=>m.id===memory.throughMessageId)+1:memory?.throughMessages??0;
-  return messages.slice(Math.max(0,boundary)).map(({ id, role, characterId, speaker, text, storyTime, sourceEventId,eventCount,snapshot }) => ({ id, role, characterId, speaker, text, storyTime:storyTime??snapshot?.time,eventCount:eventCount??snapshot?.events?.length, sourceEventId }));
+  return messages.slice(Math.max(0,boundary)).filter(m=>!m.internal).map(({ id, role, characterId, speaker, text, storyTime, sourceEventId,eventCount,snapshot }) => ({ id, role, characterId, speaker, text, storyTime:storyTime??snapshot?.time,eventCount:eventCount??snapshot?.events?.length, sourceEventId }));
 }
 
 export function buildContextRequest(state,messages,settings,ownerId='narrator',intent=state.playerIntent||{}){
@@ -708,7 +710,7 @@ Give the player a natural chance to react: if newly delivered dialogue addresses
 function environment(options, state) {
   check(typeof options.complete === 'function', 'A complete() transport must be supplied.');
   const settings = options.settings || {};
-  const env={ complete: options.complete, signal: options.signal, onStage: options.onStage, settings, startTime: state.time, allowMajorTimeSkip: false };
+  const env={ complete: options.complete, signal: options.signal, onStage: options.onStage, settings, startTime: state.time, allowMajorTimeSkip: false, unifiedPresentation:options.unifiedPresentation===true };
   state.perceptionMode='helper';
   env.semantics=createSemantics(state,env,{generate,remember,log,assertObservable,applyViews:applyPerceivedViews});
   runtimes.set(state,env);
@@ -803,9 +805,12 @@ export async function runTurn(options) {
   }
   // A silent/off-scene decision still changes the world. Give that state a new
   // narrative checkpoint rather than mutating an earlier message's snapshot.
-  if (!output.length || JSON.stringify(output.at(-1).snapshot) !== JSON.stringify(state)) {
+  if (!output.length || (env.unifiedPresentation&&!output.some(m=>m.role!=='player')) || JSON.stringify(output.at(-1).snapshot) !== JSON.stringify(state)) {
+    if(env.unifiedPresentation)output.push(message(state,'narrator','',undefined,{internal:true}));
+    else {
     const closing = await generate(env, 'Closing the moment', `Return {"text":"a brief player-visible pause or editorial response appropriate to the current moment"}. Do not retell or paraphrase environment, actions or dialogue already in alreadyPresented. If only internal state changed, use a minimal natural editorial pause. Do not invent dialogue, actions, elapsed time, visible cues from thoughts, new facts, or private disclosures. This is a checkpoint for already resolved events, not an extra development.`, { world: state, history: narratorHistory([...history, ...output],state),alreadyPresented:output.filter(m=>m.storyTime===state.time&&m.role!=='player').map(m=>({role:m.role,text:m.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim()})) }, result => string(result.text, 'closing narration'));
     output.push(message(state, 'narrator', closing.text));
+    }
   }
   aborted(env.signal);
   return { state: clone(state), messages: clone(output) };

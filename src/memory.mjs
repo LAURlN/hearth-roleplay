@@ -53,11 +53,23 @@ function plainMessage(message){
   const {id,role,characterId,speaker,text,storyTime,eventCount,sourceEventId}=message;
   return {id,role,characterId,speaker,text,storyTime:storyTime??message.snapshot?.time,eventCount:eventCount??message.snapshot?.events?.length,sourceEventId};
 }
+// Replace only exact duplicates whose complete source remains in this payload.
+// Observer-specific text, evidence and visibility decisions stay independent.
+export function modelEventRecords(events){
+  const sources=new Map(events.map((event,index)=>[event.id,{event,index}]));
+  return events.map((event,index)=>{
+    const prior=sources.get(event.eventId),source=prior?.event;
+    // A prefix summary can refer only to a preceding source checkpoint.
+    if(event.type!=='perception_decision'||!source?.id||prior.index>=index||!Array.isArray(event.deliveries)||!Array.isArray(source.perceptions)||JSON.stringify(event.deliveries)!==JSON.stringify(source.perceptions))return copy(event);
+    const {deliveries,...record}=event;
+    return {...copy(record),deliveriesRef:{eventId:source.id,field:'perceptions'}};
+  });
+}
 function narratorSources(state,messages){
   const eventStart=state.narratorMemory?.through??0,messageStart=historyStart(messages,state.narratorMemory);
   const sources=[
-    ...state.events.slice(eventStart).map((record,index)=>({kind:'event',index:index+eventStart,record:copy(record),time:record.time??state.time,boundary:(index+eventStart)*2})),
-    ...messages.slice(messageStart).map((message,index)=>{const record=plainMessage(message);return {kind:'message',index:index+messageStart,record,time:record.storyTime??state.time,boundary:Number.isInteger(record.eventCount)?record.eventCount*2-1:Infinity};}),
+    ...modelEventRecords(state.events.slice(eventStart)).map((record,index)=>({kind:'event',index:index+eventStart,record,time:record.time??state.time,boundary:(index+eventStart)*2})),
+    ...messages.slice(messageStart).flatMap((message,index)=>{if(message.internal)return [];const record=plainMessage(message);return [{kind:'message',index:index+messageStart,record,time:record.storyTime??state.time,boundary:Number.isInteger(record.eventCount)?record.eventCount*2-1:Infinity}];}),
   ];
   sources.sort((a,b)=>a.time-b.time||a.boundary-b.boundary);
   return {sources,eventStart,messageStart};
@@ -142,14 +154,15 @@ export async function compactKnowledge(state,{complete,settings,signal,onStage,m
 export function narratorProjection(state) {
   const projected=structuredClone(state);
   const archived=new Set(state.events.slice(0,state.narratorMemory?.through??0).map(e=>e.id));
-  projected.events=projected.events.slice(projected.narratorMemory?.through??0);
+  projected.events=modelEventRecords(projected.events.slice(projected.narratorMemory?.through??0));
+  if(projected.narratorMemory)projected.narratorMemory.through=0;
   for(const character of projected.characters) {
     delete character.systemPrompt;
     const start=character.memory?.through??0;
     // These records remain intact for the character. In the narrator's own
     // projection, their archived source is represented by narratorMemory.
     character.knowledge=character.knowledge.slice(start).filter(k=>!k.eventId||!archived.has(k.eventId));
-    if(character.memory)delete character.memory.sourceIds;
+    if(character.memory){character.memory.through=0;delete character.memory.sourceIds;}
   }
   projected.exposureDecisions={};
   projected.privateInputs=projected.privateInputs??[];

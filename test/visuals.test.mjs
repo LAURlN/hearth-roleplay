@@ -74,7 +74,8 @@ test('clothing changes and concealment resolve before the next actor, without re
   const returned=await applyAuthoredMessage({state:covered.state,settings,complete:scripted().complete,message:{role:'character',characterId:ada.id,text:'room'}});
   const view=current(returned.state,'Ada');
   assert.match(view.appearance,/raised hood/);assert.ok(!view.appearance.includes('black hair'));
-  assert.ok(view.rememberedAppearance.some(f=>f.text==='black hair'));
+  assert.equal(view.rememberedAppearance,undefined);
+  assert.ok(characterContext(returned.state,ada.id).rememberedAppearances.player.facts.some(f=>f.text==='black hair'));
   assert.ok(!person(returned.state,'Ben').seenAppearance?.player);
 });
 
