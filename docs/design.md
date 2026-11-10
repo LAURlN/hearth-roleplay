@@ -102,6 +102,9 @@ Status: implemented as a local first version. Accepted requirements and the desi
 
 ## Implementation choices
 
+- Select Simple or Detailed mode when starting a roleplay; the mode stays with that story and its branches. Existing stories default to Detailed. Simple uses one narrator to portray the whole cast, its own editable system prompt, and the illustrator. It keeps message revisions and rewind, without separate character knowledge or backstage orchestration.
+- Sending a player message clears the composer and displays the submitted text immediately as a temporary message. Canonical story state still commits atomically with the resolved turn. Success reconciles the temporary message once; failure/cancellation must leave the submitted text recoverable without overwriting a newer draft.
+
 - Off-scene activity advances through relevant events and elapsed story time, without calling every character every turn.
 - Interaction structure is one continuous conversation with internal location and event management.
 - Private input supports natural prose plus optional explicit [OOC: ...] and [THOUGHT: ...] markers. Ambiguous unclassified fragments remain narrator-only.

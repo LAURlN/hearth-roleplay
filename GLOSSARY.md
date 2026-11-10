@@ -4,12 +4,18 @@ A shared fictional story in which characters have separate perspectives and beli
 
 ## Language
 
+**Simple roleplay**:
+A roleplay told by one narrator portraying the surroundings and all characters, without separate character perspectives managed outside that telling.
+
+**Detailed roleplay**:
+A roleplay in which characters act through their own separate perspectives and permitted knowledge.
+
 **Character**:
 A person in the story with their own personality, intentions, choices, and knowledge.
 _Avoid_: Unit
 
 **Narrator**:
-The storyteller who knows the world's secrets and manages surroundings and consequences. Each character retains control of their own speech, intentions, and choices.
+The storyteller who knows the world's secrets and manages surroundings and consequences. In Detailed roleplay, each character retains control of their own speech, intentions, and choices. In Simple roleplay, the narrator portrays the whole cast.
 _Avoid_: Character controller
 
 **Illustrator**:

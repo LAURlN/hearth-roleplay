@@ -54,6 +54,22 @@ test('failed model refresh retains the selected models and efforts',async()=>{
   assert.equal(c.field('check-models').disabled,false);
 });
 
+test('Simple and Detailed prompts remain separately editable and submit exact independent text',async()=>{
+  let submitted;
+  const c=await controller(async(path,request)=>{
+    if(path==='/api/settings'){submitted=request.body;return {...DEFAULT_SETTINGS,...request.body};}
+    return {connected:true,models:[]};
+  });
+  c.state.story={setup:{mode:'simple'}};c.context.populateSettings();
+  c.field('setting-simpleModePrompt').value='One continuous narrator chat.\n Preserve this line.';
+  c.field('setting-roleplayPrompt').value='Independent Detailed rules';
+  c.field('setting-characterPrompt').value='Independent actor rules';
+  await c.handlers.get('settings-form:submit')({preventDefault(){}});
+  assert.equal(submitted.simpleModePrompt,'One continuous narrator chat.\n Preserve this line.');
+  assert.equal(submitted.roleplayPrompt,'Independent Detailed rules');
+  assert.equal(submitted.characterPrompt,'Independent actor rules');
+});
+
 test('a late model response cannot replace a newer connection catalog',async()=>{
   let resolveOld,calls=0;
   const c=await controller(()=>++calls===1?new Promise(resolve=>{resolveOld=resolve;}):Promise.resolve({connected:true,models:[{id:'new-model'}]}));

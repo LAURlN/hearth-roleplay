@@ -57,6 +57,13 @@ Open Settings and check the connection. The defaults are `http://127.0.0.1:10531
 
 Enter a premise, a player persona, and optionally a few predefined characters. Setups can be saved and reused. The narrator establishes the opening and introduces other characters as the story develops.
 
+Choose the **Story mode** when starting:
+
+- **Simple** is a continuous conversation with one model portraying the narrator and all characters, plus the illustrator. Set its separate **Simple mode prompt** in Settings. It uses the narrator model and effort, with no separate character or backstage generation calls during ordinary turns. Message editing, deletion, branches and rewind remain available.
+- **Detailed** uses independently controlled characters, separated knowledge and the orchestration described below. Existing stories stay in Detailed mode.
+
+The selected mode belongs to the story and all its branches. Saved setups and exports preserve it. To start in the other mode, reuse the setup and choose that mode for the new story.
+
 Settings has separate general roleplay, shared character and illustrator system prompts. The general rules apply to narration, character replies, input interpretation, appearance maintenance and the new-character curator. Shared character rules apply to actor replies only. Prompt changes in Settings apply to future requests. There are no combat stats, rewards, equipment generators, or player-managed scene modes.
 
 Each AI character can also have an individual system prompt for voice, habits and portrayal. Set it in the optional cast setup, or open **World & knowledge → Presence → Character system prompt** to edit an existing/generated character. Actor requests combine general roleplay rules, shared character rules, that actor's individual instructions, and the engine's response/knowledge protocol. Individual prompts stay out of other actors' contexts and backstage world projections, and do not automatically add observations or knowledge. Leaving an individual prompt blank uses the shared rules alone. The player is never an AI actor.
@@ -113,6 +120,8 @@ Every player, narrator and character passage has a menu for copying, editing, de
 Copy a combined Story passage to copy its displayed text, or rewind it to the response's final state. To change a particular contribution, expand the originals and edit/delete that contribution. Rewinding an original uses its own earlier checkpoint. Combined passages are rebuilt for revised continuations; original snapshots retain their historical boundaries.
 
 Rewind restores the saved world and knowledge at the chosen message. Old future memories, publications, character introductions, and illustrations stay in their old branch. Regenerate returns to the last player message and opens another continuation. A stopped or failed generation leaves the last complete saved history intact.
+
+Sending clears the composer and immediately shows your submitted message while generation runs. It is marked as not yet saved until the server completes the turn. Failed or cancelled submissions remain recoverable; a newer draft is preserved. If delivery is uncertain after a connection loss, Hearth checks saved history before allowing another send to avoid accidental duplicates.
 
 ## Illustrations
 

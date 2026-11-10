@@ -6,6 +6,7 @@ import { Illustrator } from './illustrator.mjs';
 import { compactKnowledge,narratorProjection,contextUsage } from './memory.mjs';
 import { loggedProvider,formatDebugLog,appendDebugError } from './debug-log.mjs';
 import {composeResponse,retainResponses,validateResponses} from './presentation.mjs';
+import {createSimpleState,runSimpleTurn,applySimpleAuthoredMessage,buildSimpleContextRequest} from './simple-engine.mjs';
 
 const failure=(message,status=400,code)=>Object.assign(new Error(message),{status,code});
 const transcript=messages=>messages.filter(m=>!m.internal).map(({snapshot,...message})=>({...message,storyTime:message.storyTime??snapshot?.time,eventCount:snapshot?.events?.length??message.eventCount}));
@@ -13,6 +14,8 @@ function text(value,name,limit=60000,empty=false) { if(typeof value!=='string'||
 export function validateSetup(input) {
   if(!input||typeof input!=='object'||Array.isArray(input)) throw failure('Invalid story setup.');
   const setup={title:text(input.title,'title',160),premise:text(input.premise,'premise'),persona:{name:text(input.persona?.name,'persona name',120),description:text(input.persona?.description??'','persona description',20000,true)},characters:[]};
+  if(input.mode!==undefined&&!['simple','detailed'].includes(input.mode))throw failure('Invalid story mode.');
+  setup.mode=input.mode??'detailed';
   if(input.characters!==undefined&&!Array.isArray(input.characters)) throw failure('Invalid cast.');
   if((input.characters??[]).length>30) throw failure('Begin with at most 30 predefined characters; others can arrive later.');
   for(const item of input.characters??[]) {
@@ -35,7 +38,7 @@ export class StoryService {
     let cached=this.usageCache.get(id);
     if(cached?.key!==key){
       let usage;
-      try{usage={narrator:contextUsage(branchWorld(branch),transcript(branch.messages),settings,buildContextRequest)};}
+      try{usage={narrator:contextUsage(branchWorld(branch),transcript(branch.messages),settings,story.setup.mode==='simple'?buildSimpleContextRequest:buildContextRequest)};}
       catch(error){usage={narrator:{error:error.message,threshold:settings.contextTokenLimit??300000}};}
       cached={key,usage};this.usageCache.set(id,cached);
     }
@@ -56,11 +59,12 @@ export class StoryService {
   }
   ensureFree(id) { if(this.busy.has(id)) throw failure('This story is already generating. Stop it or wait for the current turn.',409,'STORY_BUSY'); }
   assertVersion(story,version) {if(!Number.isInteger(version)||version!==story.version) throw failure('This story changed. Refresh it before trying again.',409,'STALE_STORY');}
-  env(settings,lease,traceContext) {
+  env(settings,lease,traceContext,mode) {
     const provider=loggedProvider(this.makeProvider(settings),{store:this.store,settings,getContext:()=>({...traceContext,stage:lease.stage})});
     return {settings,traceContext,complete:request=>{
       const prepared=clone(request.messages);
       for(const message of prepared) {
+        if(mode==='simple')continue;
         if(message.role!=='user'||typeof message.content!=='string')continue;
         let payload;try{payload=JSON.parse(message.content);}catch{continue;}
         for(const key of ['world','state','establishedWorld'])if(payload[key]?.characters&&payload[key]?.events)payload[key]=narratorProjection(payload[key]);
@@ -71,7 +75,7 @@ export class StoryService {
   }
   async create(input) {
     const setup=validateSetup(input),id=makeId(),branchId=makeId(),createdAt=new Date().toISOString();
-    const initialState=createInitialState(setup);
+    const initialState=setup.mode==='simple'?createSimpleState(setup):createInitialState(setup);
     const story={id,title:setup.title,setup,createdAt,updatedAt:createdAt,version:0,activeBranchId:branchId,branches:{[branchId]:{id:branchId,name:'Original',parentId:null,forkMessageId:null,createdAt,initialState,messages:[],responses:[],illustrations:[]}}};
     // Save the setup first: a failed connection does not lose the user's authored premise.
     await this.store.put(story);
@@ -88,7 +92,7 @@ export class StoryService {
       await this.store.mutate(id,version,async story=>{
         this.assertVersion(story,version);
         traceContext={storyId:id,branchId:story.activeBranchId,turnId:makeId(),anchorMessageId:story.branches[story.activeBranchId].messages.at(-1)?.id};
-        await work(story,this.env(settings,lease,traceContext));
+        await work(story,this.env(settings,lease,traceContext,story.setup.mode));
         lease.controller.signal.throwIfAborted();
       });
     } catch(error) {
@@ -102,6 +106,10 @@ export class StoryService {
     if(input!==null) text(input,'message');
     return this.operation(id,version,async (story,env)=>{
       const branch=story.branches[story.activeBranchId];
+      if(story.setup.mode==='simple'){
+        const result=await runSimpleTurn({...env,state:branchWorld(branch),messages:transcript(branch.messages),input});
+        branch.messages.push(...result.messages);return;
+      }
       const state=await compactKnowledge(branchWorld(branch),{...env,messages:transcript(branch.messages),buildRequest:buildContextRequest});
       const result=await runTurn({...env,state,messages:transcript(branch.messages),input});
       branch.messages.push(...result.messages);
@@ -128,17 +136,19 @@ export class StoryService {
       const branch={id:newId,name:`${mode==='edit'?'Revision':mode==='delete'?'Without passage':'Continuation'} ${Object.keys(story.branches).length}`,parentId:old.id,forkMessageId:input.messageId??null,createdAt:new Date().toISOString(),initialState:clone(old.initialState),messages,illustrations:clone(old.illustrations.filter(image=>messages.some(m=>m.id===image.anchorMessageId)))};
       const retained=retainResponses(old.responses,messages);if(retained!==undefined)branch.responses=retained;
       const revisionStart=messages.length;
+      const simple=story.setup.mode==='simple';
       if(mode==='edit') {
         const edited={...clone(old.messages[index]),id:makeId(),text:input.text,createdAt:new Date().toISOString()};delete edited.snapshot;
-        const result=await applyAuthoredMessage({...env,state,messages:transcript(messages),message:edited});
+        const result=await (simple?applySimpleAuthoredMessage:applyAuthoredMessage)({...env,state,messages:transcript(messages),message:edited});
         branch.messages.push(...result.messages);state=result.state;
       }
       if(input.regenerate===true||(mode!=='rewind'&&input.regenerate!==false)) {
-        state=await compactKnowledge(state,{...env,messages:transcript(branch.messages),buildRequest:buildContextRequest});
-        const continuation=await runTurn({...env,state,messages:transcript(branch.messages),input:null});
+        if(!simple)state=await compactKnowledge(state,{...env,messages:transcript(branch.messages),buildRequest:buildContextRequest});
+        const continuation=await (simple?runSimpleTurn:runTurn)({...env,state,messages:transcript(branch.messages),input:null});
+        if(simple&&branch.messages.at(-1)?.role==='player')branch.messages.at(-1).visiblePlayerInput=continuation.visiblePlayerInput;
         branch.messages.push(...continuation.messages);
       }
-      const response=await composeResponse(branch.messages.slice(revisionStart),env);
+      const response=simple?null:await composeResponse(branch.messages.slice(revisionStart),env);
       if(response)(branch.responses??=[]).push(response);
       story.branches[newId]=branch;story.activeBranchId=newId;
       story.illustrationJob={status:'cancelled'};
@@ -165,6 +175,7 @@ export class StoryService {
     if(input.canSee!==undefined&&typeof input.canSee!=='boolean')throw failure('Invalid visual perception access.');
     try{validateVisualFacts(input.facts);}catch(error){throw failure(error.message);}
     return this.operation(id,input.expectedVersion,async(story,env)=>{
+      if(story.setup.mode==='simple')throw failure('Individual character appearance controls are available in Detailed mode.');
       const old=story.branches[story.activeBranchId];
       if(!branchWorld(old).characters.some(c=>c.id===input.characterId))throw failure('Character not found.',404);
       const newId=makeId();
@@ -178,6 +189,7 @@ export class StoryService {
     text(input.characterId,'character identity',100);text(input.systemPrompt,'character system prompt',60000,true);
     if(input.characterId==='player')throw failure('The player is not an AI character.');
     return this.operation(id,input.expectedVersion,async(story,env)=>{
+      if(story.setup.mode==='simple')throw failure('Individual character instructions are available in Detailed mode.');
       const old=story.branches[story.activeBranchId],state=branchWorld(old);
       if(!state.characters.some(c=>c.id===input.characterId))throw failure('Character not found.',404);
       const newId=makeId();env.traceContext.parentBranchId=old.id;env.traceContext.branchId=newId;
@@ -199,6 +211,7 @@ export class StoryService {
     const urls=new Map();
     const validateWorld=world=>{
       if(!world||!Array.isArray(world.characters)||!world.characters.some(c=>c.id==='player')||!Array.isArray(world.events)||!Array.isArray(world.publications)||!Array.isArray(world.locations)||typeof world.location!=='string'||!Number.isFinite(world.time)||!world.exposureDecisions||!Array.isArray(world.pending)) throw failure('An imported story checkpoint is invalid.');
+      if(story.setup.mode==='simple'?world.mode!=='simple':world.mode!==undefined&&world.mode!=='detailed')throw failure('Imported checkpoint mode does not match the story mode.');
       const ids=new Set();
       if(world.perceptionMode!==undefined&&world.perceptionMode!=='helper')throw failure('Invalid imported perception mode.');
       for(const c of world.characters) {
@@ -228,6 +241,10 @@ export class StoryService {
         if(m.internal!==undefined&&typeof m.internal!=='boolean')throw failure('Invalid imported internal checkpoint.');
         if(m.internal===true&&(m.role!=='narrator'||m.text!==''))throw failure('Invalid imported internal checkpoint.');
         text(m.text,'imported message',60000,m.internal===true);validateWorld(m.snapshot);messages.add(m.id);
+        if(m.visiblePlayerInput!==undefined){
+          if(story.setup.mode!=='simple'||m.role!=='player')throw failure('Invalid imported visible player input.');
+          text(m.visiblePlayerInput,'imported visible player input',60000,true);
+        }
       }
       try{validateResponses(branch);}catch(error){throw failure(error.message);}
       for(const image of branch.illustrations) {

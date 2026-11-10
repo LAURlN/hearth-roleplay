@@ -7,10 +7,10 @@
     selection: 0, pollToken: 0, pollTimer: null, pollController: null,
     message: null, revision: null, imageIndex: 0, transcriptKey: '',
     setupLoading: false, settingsLoading: false, connection: null, drawerReturn: null, models: [], modelRequest: 0,
-    booted: false, nearBottom: true, confirmAction: null,
+    booted: false, nearBottom: true, confirmAction: null, submissions: {},
     libraryArchived: false, libraryTarget: null, visualEditor: null, appearanceSaving: false, promptEditor:null, characterPromptSaving:false,
   };
-  const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'chatEffort', 'characterEffort', 'helperEffort', 'illustratorEffort', 'roleplayPrompt', 'characterPrompt',
+  const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'chatEffort', 'characterEffort', 'helperEffort', 'illustratorEffort', 'roleplayPrompt', 'simpleModePrompt', 'characterPrompt',
     'illustratorPrompt', 'autoIllustrate', 'imageCooldown', 'imageQuality', 'imageSize',
     'maxResponders', 'contextTokenLimit'];
   const numericSettings = new Set(['imageCooldown', 'maxResponders', 'contextTokenLimit']);
@@ -84,7 +84,7 @@
     const status = story?.illustrationJob?.status;
     return Boolean(status && !finishedImageStatuses.has(status));
   }
-  function locked() { return Boolean(state.operation || state.selecting || state.story?.busy); }
+  function locked() { return Boolean(state.operation || state.selecting || state.story?.busy || activeSubmission()); }
   function dateLabel(value, withTime = false) {
     const date = new Date(value);
     if (!Number.isFinite(date.getTime())) return '';
@@ -254,10 +254,11 @@
     try {
       const story = await api(storyPath(id));
       if (selection !== state.selection) return;
+      state.submissions[id] = storage.json(`submissions:${id}`) || [];
       state.transcriptKey = '';
       state.story = null;
-      applyStory(story, { forceBottom: true });
       $('composer').value = storage.get(`draft:${story.id}`) || '';
+      applyStory(story, { forceBottom: true });
       resizeComposer();
       storage.set('last-story', story.id);
     } catch (error) {
@@ -285,14 +286,15 @@
     const changedBranch = state.story?.activeBranchId !== story.activeBranchId;
     const wasNearBottom = state.nearBottom;
     state.story = story;
+    reconcileSubmissions(story);
     upsertSummary(story);
     $('story-title').textContent = story.title || 'Untitled story';
     document.title = `${story.title || 'Your story'} · Hearth`;
-    $('header-kicker').textContent = story.world?.location || 'THE STORY CONTINUES';
+    $('header-kicker').textContent = `${story.setup?.mode === 'simple' ? 'Simple' : 'Detailed'} · ${story.world?.location || 'THE STORY CONTINUES'}`;
     $('branch-label').textContent = story.branch.name || 'Branches';
     $('open-branches').title = `Branches · ${story.branch.name}`;
     hide('story-tools', false); hide('welcome'); hide('conversation', false); hide('writing-area', false);
-    const key = JSON.stringify([story.activeBranchId, story.branch.messages, story.branch.responses, story.branch.illustrations]);
+    const key = JSON.stringify([story.activeBranchId, story.branch.messages, story.branch.responses, story.branch.illustrations, branchSubmissions()]);
     if (key !== state.transcriptKey) {
       state.transcriptKey = key;
       renderTranscript();
@@ -302,6 +304,67 @@
     if ($('branches-dialog').open) renderBranches();
     if ($('gallery-dialog').open) renderGallery();
     if ($('inspector-dialog').open) renderInspector();
+  }
+  // Submission records are local recovery data, never canonical messages or checkpoints.
+  function branchSubmissions(story = state.story) {
+    return (state.submissions?.[story?.id] || []).filter(item => item.branchId === story.activeBranchId);
+  }
+  function activeSubmission() { return branchSubmissions().find(item => item.status !== 'failed'); }
+  function saveSubmissions(id) { storage.set(`submissions:${id}`, JSON.stringify(state.submissions[id] || [])); }
+  function failSubmission(item, reason) {
+    item.status = 'failed'; item.reason = reason;
+    if (state.story?.id === item.storyId && state.story.activeBranchId === item.branchId && !$('composer').value) {
+      $('composer').value = item.draft; persistComposer(); resizeComposer();
+    }
+  }
+  function reconcileSubmissions(story, settled = false) {
+    const records = state.submissions?.[story.id];
+    if (!records?.length) return;
+    const messages = story.branch.messages || [];
+    for (const item of records.filter(entry => entry.branchId === story.activeBranchId)) {
+      const anchor = item.anchorMessageId == null ? -1 : messages.findIndex(message => message.id === item.anchorMessageId);
+      const candidate = messages.slice(anchor + 1).find(message => message.role === 'player' && !item.priorMessageIds.includes(message.id));
+      // The first new canonical player after the submitted boundary identifies this turn.
+      if ((item.anchorMessageId == null || anchor >= 0) && Number(story.version) > item.expectedVersion
+        && candidate?.role === 'player' && candidate.text === item.text && !item.priorMessageIds.includes(candidate.id)) {
+        records.splice(records.indexOf(item), 1);
+      } else if (item.status !== 'failed' && !story.busy && (settled || state.operation?.id !== story.id)) {
+        failSubmission(item, 'This passage was not saved. Restore or copy it to try again.');
+      } else if (item.status !== 'failed') item.status = story.busy ? 'generating' : 'sending';
+    }
+    saveSubmissions(story.id);
+  }
+  function renderSubmission(item) {
+    const article = node('article', 'message pending-message');
+    article.dataset.role = 'player'; article.dataset.submissionToken = item.token;
+    const failed = item.status === 'failed';
+    const status = failed ? 'Not sent · recoverable' : item.status === 'checking' ? 'Checking delivery · not yet saved'
+      : item.status === 'generating' ? 'Generating · not yet saved' : 'Sending · not yet saved';
+    const header = node('div', 'message-header');
+    header.append(node('span', 'speaker-name', 'You'), node('span', 'submission-status', status));
+    article.append(header, node('div', 'message-text', item.text));
+    if (failed) article.append(node('p', 'field-hint', item.reason));
+    const actions = node('div', 'submission-actions');
+    if (failed) {
+      const restore = button('Restore to composer', 'subtle', () => {
+        if ($('composer').value && $('composer').value !== item.draft) { toast('Your current draft is preserved. Copy the passage or clear the composer to restore it.'); return; }
+        $('composer').value = item.draft; persistComposer(); resizeComposer(); updateControls(); $('composer').focus();
+      });
+      actions.append(restore);
+    }
+    actions.append(button('Copy submitted text', 'subtle', async () => {
+      try { await navigator.clipboard.writeText(item.draft); toast('Submitted text copied.'); }
+      catch {
+        const field = node('textarea', 'submission-copy'); field.value = item.draft;
+        field.readOnly = true; field.setAttribute('aria-label', 'Submitted text to copy');
+        actions.append(field); field.focus(); field.select();
+      }
+    }));
+    if (failed) actions.append(button('Dismiss', 'subtle', () => {
+      const records = state.submissions[item.storyId]; records.splice(records.indexOf(item), 1);
+      saveSubmissions(item.storyId); state.transcriptKey = ''; renderTranscript(); updateControls();
+    }));
+    article.append(actions); return article;
   }
   function renderTranscript() {
     const container = $('conversation');
@@ -366,6 +429,7 @@
       }
       appendHiddenGroups(message.id);
     }
+    for (const item of branchSubmissions()) container.append(renderSubmission(item));
     updateMessageControls();
     const controls = [...container.querySelectorAll('[data-transcript-focus]')];
     if (menuReturn) {
@@ -465,7 +529,8 @@
     hide('image-status', !job || (!imageActive() && !['failed', 'error'].includes(job.status)));
     if (job) $('image-status').textContent = imageActive() ? '◦ The illustrator is working in the background. You can keep writing.'
       : `Illustration could not be completed: ${job.error || 'Check the proxy connection and try again from the gallery.'}`;
-    $('save-status').textContent = state.selecting ? 'Opening story…' : state.operation ? 'Working…'
+    $('save-status').textContent = state.selecting ? 'Opening story…' : activeSubmission() ? 'Submitted passage not yet saved'
+      : state.operation ? 'Working…'
       : story?.busy ? 'Generating…' : story ? `Saved locally${dateLabel(story.updatedAt, true) ? ` · ${dateLabel(story.updatedAt, true)}` : ''}` : '';
     renderContextUsage();
     updateMessageControls();
@@ -484,7 +549,7 @@
   }
   function shouldPoll() {
     return state.story && !state.selecting && (state.story.busy || imageActive()
-      || (state.operation?.id === state.story.id && state.operation.generating));
+      || activeSubmission() || (state.operation?.id === state.story.id && state.operation.generating));
   }
   function schedulePolling(delay = 1100) {
     stopPolling();
@@ -510,12 +575,17 @@
     state.pollTimer = setTimeout(poll, delay);
   }
 
-  async function mutateStory(suffix, body = {}, { generating = false, errorId, onSuccess } = {}) {
+  async function mutateStory(suffix, body = {}, { generating = false, errorId, onSuccess, submission } = {}) {
     if (!state.story || locked()) return false;
     const id = state.story.id;
     const expectedVersion = state.story.version;
     const controller = new AbortController();
-    state.operation = { id, controller, generating, stopping: false };
+    state.operation = { id, controller, generating, stopping: false, submission };
+    if (submission) {
+      state.submissions[id] = (state.submissions[id] || []).filter(item => !(item.branchId === submission.branchId && item.status === 'failed' && item.draft === submission.draft));
+      state.submissions[id].push(submission); saveSubmissions(id);
+      $('composer').value = ''; persistComposer(); resizeComposer(); renderTranscript(); scrollToBottom();
+    }
     if (errorId) inlineError(errorId, null);
     clearError(); updateControls(); renderLibrary(); schedulePolling();
     let succeeded = false;
@@ -523,7 +593,7 @@
       const result = await api(storyPath(id, suffix), { method: 'POST',
         body: { ...body, expectedVersion }, signal: controller.signal });
       stopPolling();
-      if (state.story?.id === id) applyStory(result);
+      if (state.story?.id === id) { reconcileSubmissions(result, true); applyStory(result); }
       succeeded = true;
       if (onSuccess) onSuccess(result);
     } catch (error) {
@@ -533,10 +603,20 @@
       // Reconcile errors and conflicts with the authoritative story. Never retry a turn automatically.
       try {
         const latest = await api(storyPath(id));
-        if (state.story?.id === id) applyStory(latest);
-      } catch { /* Preserve the existing readable transcript when offline. */ }
+        if (state.story?.id === id) {
+          reconcileSubmissions(latest, true); applyStory(latest);
+          if (submission && !state.submissions[id].includes(submission)) succeeded = true;
+        }
+      } catch {
+        if (submission && state.submissions[id]?.includes(submission)) {
+          submission.status = 'checking';
+          submission.reason = 'Connection interrupted. Checking whether the server saved this passage before allowing another send.';
+          saveSubmissions(id);
+        }
+      }
     } finally {
       state.operation = null;
+      if (submission && state.story?.id === id) { state.transcriptKey = ''; renderTranscript(); }
       updateControls(); renderLibrary(); schedulePolling();
       if (succeeded) refreshLibrary();
     }
@@ -573,11 +653,12 @@
     event.preventDefault();
     const text = $('composer').value.trim();
     if (!text || locked()) return;
-    const submittedValue = $('composer').value;
-    await mutateStory('/turn', { text }, { generating: true, onSuccess: () => {
-      if ($('composer').value === submittedValue) $('composer').value = '';
-      persistComposer(); resizeComposer(); scrollToBottom();
-    } });
+    const messages = state.story.branch.messages || [];
+    const token = globalThis.crypto?.randomUUID?.() || `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const submission = { token, storyId: state.story.id, branchId: state.story.activeBranchId,
+      expectedVersion: state.story.version, anchorMessageId: messages.at(-1)?.id ?? null,
+      priorMessageIds: messages.map(message => message.id), text, draft: $('composer').value, status: 'sending' };
+    await mutateStory('/turn', { text }, { generating: true, submission, onSuccess: scrollToBottom });
   });
   $('continue').addEventListener('click', () => mutateStory('/continue', {}, { generating: true, onSuccess: scrollToBottom }));
   $('syntax-help').addEventListener('click', () => {
@@ -791,6 +872,10 @@
   }
   function renderInspector() {
     renderContextUsage();
+    const simple = state.story?.setup?.mode === 'simple';
+    $('inspector-description').textContent = simple ? 'A reader’s view of the active branch. One narrator carries the story and its cast.' : 'A reader’s view of the active branch. Characters only receive their own permitted knowledge.';
+    hide('tab-knowledge', simple); hide('tab-public', simple);
+    if (simple) selectInspectorTab('presence');
     const world = state.story?.world || {};
     const characters = world.characters || [];
     const summary = $('world-summary'); summary.replaceChildren();
@@ -802,6 +887,10 @@
       const card = inspectorCard(character.name || character.id, character.location || 'Whereabouts not established',
         character.id === 'player' ? 'Your persona' : character.location === world.location ? 'At the current location · perception depends on the event' : 'Elsewhere');
       if (character.description) card.append(node('p', '', character.description));
+      if (simple) {
+        if (character.appearance) card.append(node('p', '', character.appearance));
+        presence.append(card); continue;
+      }
       if(character.id!=='player'){
         const prompt=node('details');prompt.append(node('summary','','Character system prompt'));
         prompt.append(node('p','',character.systemPrompt||'Uses the shared character system prompt with no individual additions.'));
@@ -890,7 +979,7 @@
   }
   $('open-inspector').addEventListener('click', () => { renderInspector(); openDialog('inspector-dialog'); });
   function openCharacterPrompt(characterId) {
-    if(!state.story||locked())return;
+    if(!state.story||state.story.setup?.mode==='simple'||locked())return;
     const character=state.story.world.characters.find(c=>c.id===characterId&&c.id!=='player');if(!character)return;
     state.promptEditor={storyId:state.story.id,branchId:state.story.activeBranchId,characterId};
     $('character-prompt-title').textContent=`${character.name} · System prompt`;
@@ -924,7 +1013,7 @@
     $('appearance-rows').append(row);
   }
   function openAppearanceEditor(characterId) {
-    if(!state.story||locked())return;
+    if(!state.story||state.story.setup?.mode==='simple'||locked())return;
     const character=state.story.world.characters.find(c=>c.id===characterId);if(!character)return;
     state.visualEditor={storyId:state.story.id,branchId:state.story.activeBranchId,characterId};
     $('appearance-title').textContent=`${character.name} · Appearance`;$('appearance-rows').replaceChildren();
@@ -957,12 +1046,14 @@
   tabs.forEach((name, index) => {
     $(`tab-${name}`).addEventListener('click', () => selectInspectorTab(name));
     $(`tab-${name}`).addEventListener('keydown', (event) => {
+      const available = tabs.filter(tab => !$(`tab-${tab}`).hidden);
+      const current = available.indexOf(name);
       let next;
-      if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
-      if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+      if (event.key === 'ArrowRight') next = (current + 1) % available.length;
+      if (event.key === 'ArrowLeft') next = (current + available.length - 1) % available.length;
       if (event.key === 'Home') next = 0;
-      if (event.key === 'End') next = tabs.length - 1;
-      if (next !== undefined) { event.preventDefault(); selectInspectorTab(tabs[next], true); }
+      if (event.key === 'End') next = available.length - 1;
+      if (next !== undefined) { event.preventDefault(); selectInspectorTab(available[next], true); }
     });
   });
 
@@ -979,7 +1070,7 @@
       ['personality', 'Personality', false], ['goals', 'Goals & motivations', false], ['location', 'Starting location', false],
       ['systemPrompt','Character-specific system prompt (optional)',true],
     ]) {
-      const wrapper = node('label', '', label);
+      const wrapper = node('label', key === 'systemPrompt' ? 'detailed-only' : '', label);
       const field = node(multiline ? 'textarea' : 'input');
       field.dataset.castField = key; field.value = character[key] || '';
       if (multiline) field.rows = 2;
@@ -987,7 +1078,7 @@
       if (key === 'name') { field.required = true; field.maxLength = 120; }
       wrapper.append(field); card.append(wrapper);
     }
-    const habits = node('details'); habits.append(node('summary', '', 'Internet & information habits'));
+    const habits = node('details', 'detailed-only'); habits.append(node('summary', '', 'Internet & information habits'));
     const access = node('label', 'check-label'); const checkbox = node('input'); checkbox.type = 'checkbox';
     checkbox.dataset.castOnline = 'access'; checkbox.checked = character.online?.access === true;
     access.append(checkbox, document.createTextNode('Has internet access')); habits.append(access);
@@ -997,10 +1088,16 @@
     }
     card.append(habits);
     $('cast-list').append(card);
+    renderSetupMode();
     return card;
+  }
+  function renderSetupMode() {
+    const simple = $('setup-mode').value === 'simple';
+    $('setup-form').querySelectorAll('.detailed-only').forEach(field => { field.hidden = simple; });
   }
   function collectSetup() {
     return {
+      mode: $('setup-mode').value === 'simple' ? 'simple' : 'detailed',
       title: $('setup-title').value.trim(), premise: $('setup-premise').value.trim(),
       persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
       characters: [...$('cast-list').querySelectorAll('.cast-card')].map((card) => {
@@ -1014,6 +1111,7 @@
     };
   }
   function populateSetup(setup) {
+    $('setup-mode').value = setup.mode === 'simple' ? 'simple' : 'detailed';
     $('setup-title').value = setup.title || '';
     $('setup-premise').value = setup.premise || '';
     $('persona-name').value = setup.persona?.name || '';
@@ -1021,6 +1119,7 @@
     $('cast-list').replaceChildren();
     for (const character of setup.characters || []) addCharacter(character);
     $('cast-list').closest('details').open = Boolean(setup.characters?.length);
+    renderSetupMode();
   }
   function openSetup(setup) {
     if (state.operation || state.selecting || state.setupLoading) return;
@@ -1038,6 +1137,7 @@
     card.querySelector('input').focus();
   });
   $('setup-form').addEventListener('input', () => storage.set('setup-draft', JSON.stringify(collectSetup())));
+  $('setup-mode').addEventListener('change', () => { renderSetupMode(); storage.set('setup-draft', JSON.stringify(collectSetup())); });
   $('save-setup').addEventListener('click', () => {
     storage.set('saved-setup', JSON.stringify(collectSetup()));
     $('load-setup').disabled = false; toast('Setup saved in this browser for reuse.');
@@ -1056,7 +1156,7 @@
     state.setupLoading = true;
     storage.set('setup-draft', JSON.stringify(setup));
     inlineError('setup-error', null); hide('setup-pending', false);
-    $('setup-form').querySelectorAll('input,textarea,button').forEach((field) => { field.disabled = true; });
+    $('setup-form').querySelectorAll('input,textarea,select,button').forEach((field) => { field.disabled = true; });
     $('create-story').textContent = 'Opening your story…';
     updateControls();
     try {
@@ -1075,7 +1175,7 @@
       refreshLibrary();
     } finally {
       state.setupLoading = false;
-      $('setup-form').querySelectorAll('input,textarea,button').forEach((field) => { field.disabled = false; });
+      $('setup-form').querySelectorAll('input,textarea,select,button').forEach((field) => { field.disabled = false; });
       $('load-setup').disabled = !storage.get('saved-setup');
       hide('setup-pending'); $('create-story').textContent = 'Open the first page →';
       updateControls();
@@ -1383,7 +1483,7 @@
       state.settings = data.settings;
       state.stories = data.stories || [];
       state.booted = true;
-      $('app-version').textContent = data.version || '1.2.0';
+      $('app-version').textContent = data.version || '1.3.0';
       populateSettings(); renderLibrary(); updateControls();
       const lastId = storage.get('last-story');
       if (lastId && state.stories.some((story) => story.id === lastId)) await selectStory(lastId);
