@@ -1,0 +1,1080 @@
+'use strict';
+
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    settings: null, stories: [], story: null, operation: null, selecting: false,
+    selection: 0, pollToken: 0, pollTimer: null, pollController: null,
+    message: null, revision: null, imageIndex: 0, transcriptKey: '',
+    setupLoading: false, settingsLoading: false, connection: null, drawerReturn: null,
+    booted: false, nearBottom: true, confirmAction: null,
+  };
+  const settingsFields = ['proxyBaseUrl', 'chatModel', 'imageModel', 'roleplayPrompt',
+    'illustratorPrompt', 'autoIllustrate', 'imageCooldown', 'imageQuality', 'imageSize',
+    'maxResponders', 'contextMessages'];
+  const numericSettings = new Set(['imageCooldown', 'maxResponders', 'contextMessages']);
+  const finishedImageStatuses = new Set(['completed', 'complete', 'done', 'failed', 'error',
+    'cancelled', 'canceled', 'skipped', 'superseded', 'stale', 'invalidated']);
+  const storage = {
+    get(key) { try { return localStorage.getItem(`hearth:${key}`); } catch { return null; } },
+    set(key, value) { try { localStorage.setItem(`hearth:${key}`, value); } catch { /* Private browsing may disable storage. */ } },
+    remove(key) { try { localStorage.removeItem(`hearth:${key}`); } catch { /* Optional preference. */ } },
+    json(key) { try { return JSON.parse(this.get(key)); } catch { return null; } },
+  };
+
+  function node(tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined && text !== null) element.textContent = String(text);
+    return element;
+  }
+  function button(text, className, action) {
+    const element = node('button', className, text);
+    element.type = 'button';
+    if (action) element.addEventListener('click', action);
+    return element;
+  }
+  function hide(id, hidden = true) { $(id).hidden = hidden; }
+  function inlineError(id, error) {
+    $(id).textContent = error ? error.message || String(error) : '';
+    hide(id, !error);
+  }
+  let toastTimer;
+  function toast(message) {
+    clearTimeout(toastTimer);
+    $('toast').textContent = message;
+    hide('toast', false);
+    toastTimer = setTimeout(() => hide('toast'), 4500);
+  }
+  function showError(error, retry = false) {
+    $('error-text').textContent = error.message || String(error);
+    hide('error-banner', false);
+    hide('retry-load', !retry);
+  }
+  function clearError() { hide('error-banner'); }
+
+  async function api(path, { method = 'GET', body, signal } = {}) {
+    let response;
+    try {
+      response = await fetch(path, {
+        method, credentials: 'same-origin', cache: 'no-store', signal,
+        headers: body === undefined ? { Accept: 'application/json' } : {
+          Accept: 'application/json', 'Content-Type': 'application/json',
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (error) {
+      if (error.name === 'AbortError') throw error;
+      throw new Error('The local Hearth server could not be reached. Check that it is running, then try again.');
+    }
+    let data;
+    try { data = await response.json(); }
+    catch { throw new Error(`The server returned an unreadable response (${response.status}).`); }
+    if (!response.ok) {
+      const error = new Error(data.error || `Request failed (${response.status}).`);
+      error.status = response.status;
+      error.code = data.code;
+      throw error;
+    }
+    return data;
+  }
+  function storyPath(id, suffix = '') { return `/api/stories/${encodeURIComponent(id)}${suffix}`; }
+  function imageActive(story = state.story) {
+    const status = story?.illustrationJob?.status;
+    return Boolean(status && !finishedImageStatuses.has(status));
+  }
+  function locked() { return Boolean(state.operation || state.selecting || state.story?.busy); }
+  function dateLabel(value, withTime = false) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return '';
+    return new Intl.DateTimeFormat(undefined, withTime
+      ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+      : { month: 'short', day: 'numeric' }).format(date);
+  }
+  function displayValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (Array.isArray(value)) return value.map(displayValue).join(', ');
+    return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+  }
+  function safeImageUrl(raw) {
+    if (typeof raw !== 'string') return null;
+    if (/^data:image\/(png|jpeg|webp|gif);base64,[a-z\d+/=\s]+$/i.test(raw)) return raw;
+    try {
+      const url = new URL(raw, location.origin);
+      if (url.origin === location.origin && /^https?:$/.test(url.protocol)) return url.href;
+    } catch { /* Invalid image URLs are not rendered. */ }
+    return null;
+  }
+  function makeImage(record, className) {
+    const image = node('img', className);
+    image.alt = record.caption || 'Story illustration';
+    image.loading = 'lazy';
+    const url = safeImageUrl(record.url);
+    if (url) image.src = url;
+    else image.alt = 'Illustration unavailable: invalid or external image address';
+    image.addEventListener('error', () => { image.alt = 'Illustration unavailable. The image file could not be loaded.'; });
+    return image;
+  }
+
+  let focusBeforeDialog = new WeakMap();
+  function openDialog(id, focusId) {
+    const dialog = $(id);
+    if (dialog.open) return;
+    focusBeforeDialog.set(dialog, document.activeElement);
+    dialog.showModal();
+    if (focusId) requestAnimationFrame(() => $(focusId).focus());
+  }
+  function closeDialog(dialog) {
+    if (typeof dialog === 'string') dialog = $(dialog);
+    if (dialog.id === 'setup-dialog' && state.setupLoading) return;
+    if (dialog.id === 'settings-dialog' && state.settingsLoading) return;
+    dialog.close();
+  }
+  document.querySelectorAll('dialog').forEach((dialog) => {
+    const heading = dialog.querySelector('.dialog-heading h2');
+    if (heading) {
+      if (!heading.id) heading.id = `${dialog.id}-title`;
+      dialog.setAttribute('aria-labelledby', heading.id);
+    }
+    dialog.addEventListener('close', () => {
+      dialog.querySelectorAll('.copy-fallback').forEach((field) => field.remove());
+      const previous = focusBeforeDialog.get(dialog);
+      if (previous?.isConnected && !previous.disabled) previous.focus();
+      else if (state.story) $('composer').focus({ preventScroll: true });
+      else $('welcome-start').focus({ preventScroll: true });
+    });
+    dialog.addEventListener('cancel', (event) => {
+      if ((dialog.id === 'setup-dialog' && state.setupLoading)
+        || (dialog.id === 'settings-dialog' && state.settingsLoading)) event.preventDefault();
+    });
+    dialog.querySelectorAll('[data-close]').forEach((control) => {
+      control.addEventListener('click', () => closeDialog(dialog));
+    });
+  });
+
+  const mobile = matchMedia('(max-width: 820px)');
+  function setDrawer(open) {
+    if (open && !mobile.matches) return;
+    if (open) state.drawerReturn = document.activeElement;
+    $('library').classList.toggle('is-open', open);
+    $('open-library').setAttribute('aria-expanded', String(open));
+    $('workspace').inert = open;
+    $('library').inert = mobile.matches && !open;
+    hide('drawer-shade', !open);
+    if (open) {
+      $('library').setAttribute('role', 'dialog');
+      $('library').setAttribute('aria-modal', 'true');
+      $('close-library').focus();
+    } else {
+      $('library').removeAttribute('role');
+      $('library').removeAttribute('aria-modal');
+      if (state.drawerReturn?.isConnected) state.drawerReturn.focus();
+      state.drawerReturn = null;
+    }
+  }
+  $('open-library').addEventListener('click', () => setDrawer(true));
+  $('close-library').addEventListener('click', () => setDrawer(false));
+  $('drawer-shade').addEventListener('click', () => setDrawer(false));
+  mobile.addEventListener('change', () => setDrawer(false));
+  setDrawer(false);
+  document.addEventListener('keydown', (event) => {
+    if (!$('library').classList.contains('is-open') || document.querySelector('dialog[open]')) return;
+    if (event.key === 'Escape') { event.preventDefault(); setDrawer(false); }
+    if (event.key === 'Tab') {
+      const controls = [...$('library').querySelectorAll('a,button,input')]
+        .filter((element) => !element.disabled && element.getClientRects().length);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  });
+
+  function renderLibrary() {
+    const list = $('story-list');
+    list.replaceChildren();
+    const query = $('story-search').value.toLocaleLowerCase().trim();
+    const summaries = [...state.stories].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    $('story-count').textContent = String(summaries.length);
+    summaries.filter((story) => String(story.title).toLocaleLowerCase().includes(query)).forEach((story) => {
+      const item = button('', 'story-item', () => selectStory(story.id));
+      item.disabled = Boolean(state.operation || state.selecting);
+      item.setAttribute('aria-current', String(story.id === state.story?.id));
+      item.append(node('span', 'story-item-title', story.title || 'Untitled story'));
+      item.append(node('span', 'story-item-meta', `${dateLabel(story.updatedAt)} · ${story.messageCount || 0} passages · ${story.branchCount || 1} ${story.branchCount === 1 ? 'branch' : 'branches'}`));
+      list.append(item);
+    });
+    if (!list.childElementCount) list.append(node('p', 'library-note muted', query ? 'No stories match your search.' : 'Your next world belongs here. Begin a story above.'));
+  }
+  $('story-search').addEventListener('input', renderLibrary);
+  async function refreshLibrary() {
+    try { state.stories = await api('/api/stories'); renderLibrary(); }
+    catch { /* The story response already confirms the primary save. */ }
+  }
+  function upsertSummary(story) {
+    const summary = { id: story.id, title: story.title, updatedAt: story.updatedAt,
+      messageCount: story.branch.messages.length, branchCount: story.branches.length };
+    const index = state.stories.findIndex((item) => item.id === story.id);
+    if (index < 0) state.stories.unshift(summary);
+    else state.stories[index] = summary;
+  }
+  function persistComposer() {
+    if (state.story) storage.set(`draft:${state.story.id}`, $('composer').value);
+  }
+  function resizeComposer() {
+    const composer = $('composer');
+    composer.style.height = 'auto';
+    composer.style.height = `${Math.min(180, Math.max(64, composer.scrollHeight))}px`;
+  }
+  async function selectStory(id) {
+    if (state.operation || state.selecting) return;
+    persistComposer();
+    setDrawer(false);
+    clearError();
+    state.failedSelection = null;
+    stopPolling();
+    const selection = ++state.selection;
+    state.selecting = true;
+    hide('story-loading', false);
+    hide('welcome'); hide('conversation'); hide('writing-area');
+    updateControls(); renderLibrary();
+    try {
+      const story = await api(storyPath(id));
+      if (selection !== state.selection) return;
+      state.transcriptKey = '';
+      state.story = null;
+      applyStory(story, { forceBottom: true });
+      $('composer').value = storage.get(`draft:${story.id}`) || '';
+      resizeComposer();
+      storage.set('last-story', story.id);
+    } catch (error) {
+      state.failedSelection = id;
+      showError(error, true);
+      if (error.status === 404) {
+        storage.remove('last-story');
+        state.stories = state.stories.filter((story) => story.id !== id);
+      }
+    } finally {
+      if (selection === state.selection) {
+        state.selecting = false;
+        hide('story-loading');
+        hide('welcome', Boolean(state.story));
+        hide('conversation', !state.story);
+        hide('writing-area', !state.story);
+        updateControls(); renderLibrary(); schedulePolling();
+      }
+    }
+  }
+
+  function applyStory(story, { forceBottom = false } = {}) {
+    if (state.story?.id === story.id && Number(story.version) < Number(state.story.version)) return;
+    const changedStory = state.story?.id !== story.id;
+    const changedBranch = state.story?.activeBranchId !== story.activeBranchId;
+    const wasNearBottom = state.nearBottom;
+    state.story = story;
+    upsertSummary(story);
+    $('story-title').textContent = story.title || 'Untitled story';
+    document.title = `${story.title || 'Your story'} · Hearth`;
+    $('header-kicker').textContent = story.world?.location || 'THE STORY CONTINUES';
+    $('branch-label').textContent = story.branch.name || 'Branches';
+    $('open-branches').title = `Branches · ${story.branch.name}`;
+    hide('story-tools', false); hide('welcome'); hide('conversation', false); hide('writing-area', false);
+    const key = JSON.stringify([story.activeBranchId, story.branch.messages, story.branch.illustrations]);
+    if (key !== state.transcriptKey) {
+      state.transcriptKey = key;
+      renderTranscript();
+      if (forceBottom || changedStory || changedBranch || wasNearBottom) scrollToBottom();
+    }
+    renderLibrary(); updateControls();
+    if ($('branches-dialog').open) renderBranches();
+    if ($('gallery-dialog').open) renderGallery();
+    if ($('inspector-dialog').open) renderInspector();
+  }
+  function renderTranscript() {
+    const container = $('conversation');
+    const focusedMessage = document.activeElement?.dataset?.messageAction;
+    container.replaceChildren(node('div', 'story-prologue', 'A story in the making'));
+    const messages = state.story.branch.messages || [];
+    if (!messages.length) container.append(node('p', 'empty-note', 'The page is yours. Write a beginning, or choose Continue to let the narrator open the story.'));
+    for (const message of messages) {
+      const article = node('article', 'message');
+      article.dataset.role = message.role;
+      article.dataset.messageId = message.id;
+      const header = node('div', 'message-header');
+      const dot = node('span', 'speaker-dot'); dot.setAttribute('aria-hidden', 'true');
+      const name = message.speaker || (message.role === 'player' ? 'You' : 'Narrator');
+      const menu = button('···', 'icon-button message-menu', () => openMessageMenu(message.id));
+      menu.setAttribute('aria-label', `Options for ${name}’s passage`);
+      menu.setAttribute('aria-haspopup', 'dialog');
+      menu.dataset.messageAction = message.id;
+      const time = node('time', 'message-time', dateLabel(message.createdAt, true));
+      if (Number.isFinite(Date.parse(message.createdAt))) time.dateTime = message.createdAt;
+      header.append(dot, node('span', 'speaker-name', name), time, menu);
+      article.append(header, node('div', 'message-text', message.text));
+      const images = (state.story.branch.illustrations || []).filter((image) => image.anchorMessageId === message.id);
+      if (images.length) {
+        const row = node('div', 'message-images');
+        for (const record of images) {
+          const card = button('', 'message-image', () => openImage(record.id));
+          card.setAttribute('aria-label', `View illustration: ${record.caption || 'Story moment'}`);
+          card.append(makeImage(record), node('span', '', record.caption || 'A moment, illustrated'));
+          row.append(card);
+        }
+        article.append(row);
+      }
+      container.append(article);
+    }
+    updateMessageControls();
+    if (focusedMessage && !document.querySelector('dialog[open]')) {
+      const focusedButton = [...container.querySelectorAll('[data-message-action]')]
+        .find((element) => element.dataset.messageAction === focusedMessage);
+      focusedButton?.focus({ preventScroll: true });
+    }
+  }
+  function updateMessageControls() {
+    // Copy remains available during generation; mutating options are gated in the menu.
+    $('conversation').querySelectorAll('.message-menu').forEach((element) => { element.disabled = state.selecting; });
+  }
+  function scrollToBottom() {
+    requestAnimationFrame(() => {
+      $('reading-pane').scrollTop = $('reading-pane').scrollHeight;
+      state.nearBottom = true;
+      hide('jump-latest');
+    });
+  }
+  $('reading-pane').addEventListener('scroll', () => {
+    const pane = $('reading-pane');
+    state.nearBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 160;
+    hide('jump-latest', state.nearBottom || !state.story);
+  }, { passive: true });
+  $('jump-latest').addEventListener('click', scrollToBottom);
+  $('conversation').addEventListener('load', (event) => {
+    if (event.target.tagName === 'IMG' && state.nearBottom) scrollToBottom();
+  }, true);
+
+  function updateControls() {
+    const story = state.story;
+    const busy = Boolean(story?.busy || (state.operation?.generating && state.operation.id === story?.id));
+    const isLocked = locked();
+    $('new-story').disabled = Boolean(state.operation || state.selecting || state.setupLoading);
+    $('welcome-start').disabled = !state.booted || Boolean(state.operation || state.selecting);
+    $('import-story').disabled = !state.booted || Boolean(state.operation || state.selecting || state.setupLoading);
+    $('send-message').disabled = !story || isLocked || !$('composer').value.trim();
+    $('continue').disabled = !story || isLocked;
+    $('regenerate').disabled = !story || isLocked || !regenerationBoundary();
+    $('open-branches').disabled = !story || isLocked;
+    $('open-story-menu').disabled = !story || isLocked;
+    $('illustrate-latest').disabled = !story || isLocked || imageActive();
+    $('rewind-start').disabled = !story || isLocked;
+    hide('generation-status', !busy);
+    $('generation-stage').textContent = story?.stage || (state.operation?.stopping ? 'Stopping at a safe boundary…' : 'Preparing the next passage…');
+    $('stop-generation').disabled = Boolean(state.operation?.stopping);
+    const job = story?.illustrationJob;
+    hide('image-status', !job || (!imageActive() && !['failed', 'error'].includes(job.status)));
+    if (job) $('image-status').textContent = imageActive() ? '◦ The illustrator is working in the background. You can keep writing.'
+      : `Illustration could not be completed: ${job.error || 'Check the proxy connection and try again from the gallery.'}`;
+    $('save-status').textContent = state.selecting ? 'Opening story…' : state.operation ? 'Working…'
+      : story?.busy ? 'Generating…' : story ? `Saved locally${dateLabel(story.updatedAt, true) ? ` · ${dateLabel(story.updatedAt, true)}` : ''}` : '';
+    updateMessageControls();
+    if ($('branches-dialog').open) {
+      $('branch-list').querySelectorAll('button').forEach((control) => { control.disabled = isLocked; });
+    }
+    if ($('message-dialog').open) updateMenuControls();
+  }
+
+  function stopPolling() {
+    state.pollToken++;
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+    state.pollController?.abort();
+    state.pollController = null;
+  }
+  function shouldPoll() {
+    return state.story && !state.selecting && (state.story.busy || imageActive()
+      || (state.operation?.id === state.story.id && state.operation.generating));
+  }
+  function schedulePolling(delay = 1100) {
+    stopPolling();
+    if (!shouldPoll()) return;
+    const token = state.pollToken;
+    const id = state.story.id;
+    const poll = async () => {
+      if (token !== state.pollToken || !shouldPoll() || state.story?.id !== id) return;
+      const controller = new AbortController();
+      state.pollController = controller;
+      try {
+        const result = await api(storyPath(id), { signal: controller.signal });
+        if (token !== state.pollToken || state.story?.id !== id) return;
+        applyStory(result);
+        if (state.operation) $('save-status').textContent = 'Working…';
+        if (shouldPoll()) state.pollTimer = setTimeout(poll, document.hidden ? 4000 : 1300);
+      } catch (error) {
+        if (error.name === 'AbortError' || token !== state.pollToken) return;
+        $('save-status').textContent = 'Status connection interrupted · retrying';
+        if (shouldPoll()) state.pollTimer = setTimeout(poll, 5000);
+      }
+    };
+    state.pollTimer = setTimeout(poll, delay);
+  }
+
+  async function mutateStory(suffix, body = {}, { generating = false, errorId, onSuccess } = {}) {
+    if (!state.story || locked()) return false;
+    const id = state.story.id;
+    const expectedVersion = state.story.version;
+    const controller = new AbortController();
+    state.operation = { id, controller, generating, stopping: false };
+    if (errorId) inlineError(errorId, null);
+    clearError(); updateControls(); renderLibrary(); schedulePolling();
+    let succeeded = false;
+    try {
+      const result = await api(storyPath(id, suffix), { method: 'POST',
+        body: { ...body, expectedVersion }, signal: controller.signal });
+      stopPolling();
+      if (state.story?.id === id) applyStory(result);
+      succeeded = true;
+      if (onSuccess) onSuccess(result);
+    } catch (error) {
+      if (error.name === 'AbortError') toast('Generation stopped. Completed history is preserved.');
+      else if (errorId) inlineError(errorId, error);
+      else showError(error);
+      // Reconcile errors and conflicts with the authoritative story. Never retry a turn automatically.
+      try {
+        const latest = await api(storyPath(id));
+        if (state.story?.id === id) applyStory(latest);
+      } catch { /* Preserve the existing readable transcript when offline. */ }
+    } finally {
+      state.operation = null;
+      updateControls(); renderLibrary(); schedulePolling();
+      if (succeeded) refreshLibrary();
+    }
+    return succeeded;
+  }
+  $('stop-generation').addEventListener('click', async () => {
+    if (!state.story || state.operation?.stopping) return;
+    const id = state.story.id;
+    const operation = state.operation;
+    if (operation) operation.stopping = true;
+    $('stop-generation').disabled = true;
+    $('generation-stage').textContent = 'Stopping at a safe boundary…';
+    try {
+      const result = await api(storyPath(id, '/cancel'), { method: 'POST', body: {} });
+      if (result.cancelled) operation?.controller.abort();
+      const story = await api(storyPath(id));
+      if (state.story?.id === id) applyStory(story);
+      schedulePolling();
+      toast(result.cancelled ? 'Stop requested. Your completed history is safe.' : 'No active generation remains.');
+    } catch (error) {
+      if (operation) operation.stopping = false;
+      showError(error);
+    } finally { updateControls(); }
+  });
+
+  $('composer').addEventListener('input', () => { resizeComposer(); persistComposer(); updateControls(); });
+  $('composer').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      if (!$('send-message').disabled) $('composer-form').requestSubmit();
+    }
+  });
+  $('composer-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const text = $('composer').value.trim();
+    if (!text || locked()) return;
+    const submittedValue = $('composer').value;
+    await mutateStory('/turn', { text }, { generating: true, onSuccess: () => {
+      if ($('composer').value === submittedValue) $('composer').value = '';
+      persistComposer(); resizeComposer(); scrollToBottom();
+    } });
+  });
+  $('continue').addEventListener('click', () => mutateStory('/continue', {}, { generating: true, onSuccess: scrollToBottom }));
+  $('syntax-help').addEventListener('click', () => {
+    const show = $('syntax-note').hidden;
+    hide('syntax-note', !show);
+    $('syntax-help').setAttribute('aria-expanded', String(show));
+  });
+  function regenerationBoundary() {
+    const messages = state.story?.branch.messages || [];
+    if (!messages.some((message) => message.role !== 'player')) return null;
+    let index = messages.length - 1;
+    while (index >= 0 && messages[index].role !== 'player') index--;
+    if (index === messages.length - 1) return null;
+    return { messageId: index >= 0 ? messages[index].id : undefined };
+  }
+  $('regenerate').addEventListener('click', () => {
+    const boundary = regenerationBoundary();
+    if (boundary) openRevision('regenerate', boundary.messageId);
+  });
+
+  function openMessageMenu(id) {
+    state.message = state.story?.branch.messages.find((message) => message.id === id);
+    if (!state.message) return;
+    $('message-menu-title').textContent = `${state.message.speaker || 'Passage'} · Options`;
+    updateMenuControls();
+    openDialog('message-dialog');
+  }
+  function updateMenuControls() {
+    ['edit-message', 'delete-message', 'rewind-message'].forEach((id) => { $(id).disabled = locked(); });
+    $('illustrate-message').disabled = locked() || imageActive();
+  }
+  $('copy-message').addEventListener('click', async () => {
+    if (!state.message) return;
+    const text = state.message.text;
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else throw new Error('Clipboard unavailable');
+      closeDialog('message-dialog'); toast('Passage copied.');
+    } catch {
+      // Clipboard APIs may be unavailable on an Android LAN HTTP origin.
+      const field = node('textarea', 'copy-fallback');
+      field.value = text; field.setAttribute('aria-label', 'Text to copy');
+      $('message-dialog').append(field); field.focus(); field.select();
+      let copied = false;
+      try { copied = document.execCommand('copy'); } catch { /* Leave the selected text for manual copying. */ }
+      if (copied) { field.remove(); closeDialog('message-dialog'); toast('Passage copied.'); }
+      else { toast('Clipboard access is unavailable. Select and copy the text below.'); }
+    }
+  });
+  $('edit-message').addEventListener('click', () => openRevision('edit', state.message?.id));
+  $('delete-message').addEventListener('click', () => openRevision('delete', state.message?.id));
+  $('rewind-message').addEventListener('click', () => openRevision('rewind', state.message?.id));
+  $('illustrate-message').addEventListener('click', () => {
+    const messageId = state.message?.id;
+    closeDialog('message-dialog');
+    mutateStory('/illustrate', { messageId }, { onSuccess: () => toast('Illustration requested. You can keep writing.') });
+  });
+
+  function openRevision(mode, messageId) {
+    if (locked()) return;
+    const message = state.story?.branch.messages.find((item) => item.id === messageId);
+    const draftKey = `revision-draft:${state.story.id}:${state.story.activeBranchId}:${messageId}`;
+    state.revision = { mode, messageId, draftKey, storyId: state.story.id, branchId: state.story.activeBranchId };
+    const descriptions = {
+      edit: ['Edit passage', 'Revise this passage in a new branch. The revised text is kept as you write it; a fresh AI continuation follows.', 'Save & continue'],
+      delete: ['Delete passage', 'Remove this passage in a new branch, restore the world to the preceding boundary, and generate a fresh continuation.', 'Delete & continue'],
+      rewind: ['Continue from here', messageId ? 'Keep this passage and everything before it. A new branch opens at this exact point, ready for your next choice.' : 'Open a new branch at the original setup, before the first passage. Your existing story stays available.', 'Create branch'],
+      regenerate: ['A different continuation', 'Return to your last player message and generate a fresh AI continuation. The previous version stays available in its own branch.', 'Regenerate'],
+    };
+    const [title, description, action] = descriptions[mode];
+    $('revision-title').textContent = title;
+    $('revision-description').textContent = description;
+    $('confirm-revision').textContent = action;
+    $('revision-text').value = mode === 'edit' ? storage.get(draftKey) ?? message?.text ?? '' : message?.text || '';
+    $('revision-text').required = mode === 'edit';
+    hide('revision-label', mode !== 'edit');
+    inlineError('revision-error', null);
+    if ($('message-dialog').open) closeDialog('message-dialog');
+    if ($('branches-dialog').open) closeDialog('branches-dialog');
+    openDialog('revision-dialog', mode === 'edit' ? 'revision-text' : 'confirm-revision');
+  }
+  $('revision-text').addEventListener('input', () => {
+    if (state.revision?.mode === 'edit') storage.set(state.revision.draftKey, $('revision-text').value);
+  });
+  $('revision-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const revision = state.revision;
+    if (!revision || locked()) return;
+    const body = { mode: revision.mode === 'regenerate' ? 'rewind' : revision.mode };
+    if (revision.messageId) body.messageId = revision.messageId;
+    if (revision.mode === 'edit') { body.text = $('revision-text').value; storage.set(revision.draftKey, body.text); }
+    if (revision.mode === 'regenerate') body.regenerate = true;
+    else if (revision.mode === 'rewind') body.regenerate = false;
+    $('confirm-revision').disabled = true;
+    // The long-running revision progresses in the main chat, where Stop remains accessible.
+    closeDialog('revision-dialog');
+    const success = await mutateStory('/branch', body, { generating: revision.mode !== 'rewind',
+      onSuccess: () => { toast('New branch saved. The original future is in Branches.'); scrollToBottom(); } });
+    $('confirm-revision').disabled = false;
+    if (success && revision.mode === 'edit') storage.remove(revision.draftKey);
+    if (!success && !state.story?.busy) {
+      if (revision.mode === 'edit' && state.story?.id === revision.storyId && state.story.activeBranchId === revision.branchId) openRevision('edit', revision.messageId);
+      toast('Revision did not complete. Your edit draft is preserved; check the error before retrying.');
+    }
+  });
+
+  function renderBranches() {
+    const list = $('branch-list'); list.replaceChildren();
+    for (const branch of state.story?.branches || []) {
+      const current = branch.id === state.story.activeBranchId;
+      const card = button('', 'branch-card', async () => {
+        if (current) return;
+        await mutateStory('/switch', { branchId: branch.id }, { onSuccess: () => {
+          closeDialog('branches-dialog'); toast(`Switched to ${branch.name}.`);
+        } });
+      });
+      card.setAttribute('aria-current', String(current));
+      card.disabled = locked();
+      const description = node('span');
+      description.append(node('strong', '', branch.name || 'Story branch'),
+        node('small', '', `${branch.messageCount || 0} passages · ${dateLabel(branch.createdAt, true)}${branch.parentId ? ' · Revised history' : ' · Original history'}`));
+      card.append(description, node('span', '', current ? 'Reading' : 'Open →'));
+      list.append(card);
+    }
+  }
+  $('open-branches').addEventListener('click', () => { renderBranches(); openDialog('branches-dialog'); });
+  $('rewind-start').addEventListener('click', () => openRevision('rewind'));
+
+  function renderGallery() {
+    const grid = $('gallery-grid'); grid.replaceChildren();
+    const images = state.story?.branch.illustrations || [];
+    for (const record of images) {
+      const card = button('', 'gallery-card', () => openImage(record.id));
+      card.append(makeImage(record), node('span', '', record.caption || 'An illustrated moment'));
+      grid.append(card);
+    }
+    if (!images.length) grid.append(node('p', 'empty-note', 'No illustrations in this branch yet. Let the illustrator find a moment, or request one here.'));
+    updateControls();
+  }
+  $('open-gallery').addEventListener('click', () => { renderGallery(); openDialog('gallery-dialog'); });
+  $('illustrate-latest').addEventListener('click', () => mutateStory('/illustrate', {}, {
+    onSuccess: () => toast('The illustrator is finding the moment. Results will appear here.'),
+  }));
+  function addDetail(container, label, value) {
+    container.append(node('dt', '', label), node('dd', '', displayValue(value)));
+  }
+  function openImage(id) {
+    state.imageIndex = (state.story?.branch.illustrations || []).findIndex((image) => image.id === id);
+    if (state.imageIndex < 0) return;
+    renderLightbox(); openDialog('lightbox-dialog');
+  }
+  function renderLightbox() {
+    const images = state.story?.branch.illustrations || [];
+    const record = images[state.imageIndex];
+    if (!record) { closeDialog('lightbox-dialog'); return; }
+    const image = $('lightbox-image');
+    image.removeAttribute('src');
+    const url = safeImageUrl(record.url);
+    image.alt = record.caption || 'Story illustration';
+    if (url) image.src = url;
+    else image.alt = 'Illustration unavailable: invalid or external image address';
+    $('lightbox-title').textContent = `Illustration ${state.imageIndex + 1}`;
+    $('lightbox-caption').textContent = record.caption || 'An illustrated moment';
+    $('image-position').textContent = `${state.imageIndex + 1} / ${images.length}`;
+    $('previous-image').disabled = state.imageIndex === 0;
+    $('next-image').disabled = state.imageIndex === images.length - 1;
+    const details = $('image-details'); details.replaceChildren();
+    addDetail(details, 'Prompt', record.prompt);
+    const references = (record.referenceIds || []).map((id) => {
+      const reference = images.find((item) => item.id === id);
+      return reference ? reference.caption || reference.id : id;
+    });
+    addDetail(details, 'Visual references', references.length ? references : 'Initial illustration · no references');
+    if (record.appearanceNotes) addDetail(details, 'Appearance notes', record.appearanceNotes);
+    addDetail(details, 'Created', dateLabel(record.createdAt, true));
+    addDetail(details, 'Story anchor', record.anchorMessageId);
+  }
+  function stepImage(delta) {
+    const next = state.imageIndex + delta;
+    if (next < 0 || next >= (state.story?.branch.illustrations.length || 0)) return;
+    state.imageIndex = next; renderLightbox();
+  }
+  $('previous-image').addEventListener('click', () => stepImage(-1));
+  $('next-image').addEventListener('click', () => stepImage(1));
+  $('lightbox-dialog').addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowLeft') { event.preventDefault(); stepImage(-1); }
+    if (event.key === 'ArrowRight') { event.preventDefault(); stepImage(1); }
+  });
+  $('lightbox-image').addEventListener('error', () => { $('lightbox-image').alt = 'Illustration unavailable. The image file could not be loaded.'; });
+
+  function inspectorCard(title, text, meta) {
+    const card = node('article', 'inspector-card');
+    card.append(node('h3', '', title), node('p', '', text));
+    if (meta) card.append(node('small', '', meta));
+    return card;
+  }
+  function renderInspector() {
+    const world = state.story?.world || {};
+    const characters = world.characters || [];
+    const summary = $('world-summary'); summary.replaceChildren();
+    summary.append(node('span', '', world.location || 'Location not established'),
+      node('small', '', `${world.timeLabel || 'Story time'} · ${world.time ?? 0} fictional minutes`));
+    const presence = $('panel-presence'), knowledge = $('panel-knowledge'), publications = $('panel-public');
+    presence.replaceChildren(); knowledge.replaceChildren(); publications.replaceChildren();
+    for (const character of characters) {
+      const card = inspectorCard(character.name || character.id, character.location || 'Whereabouts not established',
+        character.id === 'player' ? 'Your persona' : character.location === world.location ? 'At the current location · perception depends on the event' : 'Elsewhere');
+      if (character.description) card.append(node('p', '', character.description));
+      presence.append(card);
+      const entry = node('details', 'inspector-card');
+      entry.append(node('summary', '', `${character.name || character.id} · ${(character.knowledge || []).length} observations`));
+      for (const fact of character.knowledge || []) {
+        const item = node('div', 'knowledge-entry');
+        item.append(node('p', '', fact.text), node('small', '', `Source: ${displayValue(fact.source)} · Learned at ${displayValue(fact.time)}${fact.eventId ? ` · Event ${fact.eventId}` : ''}`));
+        entry.append(item);
+      }
+      if (!character.knowledge?.length) entry.append(node('p', '', 'No story observations recorded yet.'));
+      if (character.privateState) {
+        const privateDetails = node('details');
+        privateDetails.append(node('summary', '', 'Private state · reader only'), node('p', '', character.privateState));
+        entry.append(privateDetails);
+      }
+      if (character.memory?.summary) {
+        const memory = node('details'); memory.append(node('summary', '', `Continuity summary · first ${character.memory.through} observations`), node('p', '', character.memory.summary)); entry.append(memory);
+      }
+      if (character.online) entry.append(node('small', '', `Online access: ${character.online.access ? 'yes' : 'no'} · Interests: ${displayValue(character.online.interests)} · Connections: ${displayValue(character.online.connections)}`));
+      knowledge.append(entry);
+    }
+    if (!characters.length) {
+      presence.append(node('p', 'empty-note', 'No whereabouts recorded yet.'));
+      knowledge.append(node('p', 'empty-note', 'Knowledge will appear as the story unfolds.'));
+    }
+    const recentEvents = (world.events || []).slice(-30).reverse();
+    if (recentEvents.length) {
+      const events = node('details', 'inspector-card');
+      events.append(node('summary', '', 'Recent events & transitions'));
+      for (const event of recentEvents) {
+        const item = node('div', 'knowledge-entry');
+        item.append(node('p', '', event.text || event.description || event.type || 'Story event'));
+        const details = node('dl', 'detail-list');
+        for (const [key, value] of Object.entries(event)) {
+          if (!['text', 'description', 'id'].includes(key)) addDetail(details, key, value);
+        }
+        item.append(details); events.append(item);
+      }
+      presence.append(events);
+    }
+    if (world.sharedBackground?.length) publications.append(inspectorCard('Shared setting knowledge', world.sharedBackground.join('\n\n')));
+    for (const publication of world.publications || []) {
+      const entry = inspectorCard(publication.title || publication.type || 'Public information',
+        publication.text || publication.content || publication.description || 'Published information');
+      const details = node('dl', 'detail-list');
+      for (const [key, value] of Object.entries(publication)) {
+        if (!['text', 'content', 'description', 'title'].includes(key)) addDetail(details, key, value);
+      }
+      entry.append(details); publications.append(entry);
+    }
+    if (!world.publications?.length) publications.append(node('p', 'empty-note', 'Nothing has been published in this branch. Public availability does not automatically mean a character has seen it.'));
+    const decisions = Object.entries(world.exposureDecisions || {});
+    if (decisions.length) {
+      const section = node('details', 'inspector-card');
+      section.append(node('summary', '', 'Resolved exposure decisions'));
+      const list = node('dl', 'detail-list');
+      for (const [id, exposed] of decisions) addDetail(list, id, exposed ? 'Exposed' : 'Not exposed');
+      section.append(list); publications.append(section);
+    }
+  }
+  $('open-inspector').addEventListener('click', () => { renderInspector(); openDialog('inspector-dialog'); });
+  const tabs = ['presence', 'knowledge', 'public'];
+  function selectInspectorTab(name, focus = false) {
+    for (const tab of tabs) {
+      const selected = tab === name;
+      $(`tab-${tab}`).setAttribute('aria-selected', String(selected));
+      $(`tab-${tab}`).tabIndex = selected ? 0 : -1;
+      hide(`panel-${tab}`, !selected);
+    }
+    if (focus) $(`tab-${name}`).focus();
+  }
+  tabs.forEach((name, index) => {
+    $(`tab-${name}`).addEventListener('click', () => selectInspectorTab(name));
+    $(`tab-${name}`).addEventListener('keydown', (event) => {
+      let next;
+      if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+      if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+      if (event.key === 'Home') next = 0;
+      if (event.key === 'End') next = tabs.length - 1;
+      if (next !== undefined) { event.preventDefault(); selectInspectorTab(tabs[next], true); }
+    });
+  });
+
+  function addCharacter(character = {}) {
+    const card = node('section', 'cast-card');
+    if (character.online) card.castOnline = structuredClone(character.online);
+    const heading = node('div', 'cast-card-heading');
+    heading.append(node('span', '', 'A CHARACTER'), button('Remove', 'subtle danger-text', () => {
+      card.remove(); storage.set('setup-draft', JSON.stringify(collectSetup()));
+    }));
+    card.append(heading);
+    for (const [key, label, multiline] of [
+      ['name', 'Name', false], ['description', 'Background', true], ['appearance', 'Appearance', false],
+      ['personality', 'Personality', false], ['goals', 'Goals & motivations', false], ['location', 'Starting location', false],
+    ]) {
+      const wrapper = node('label', '', label);
+      const field = node(multiline ? 'textarea' : 'input');
+      field.dataset.castField = key; field.value = character[key] || '';
+      if (multiline) field.rows = 2;
+      if (key === 'name') { field.required = true; field.maxLength = 120; }
+      wrapper.append(field); card.append(wrapper);
+    }
+    const habits = node('details'); habits.append(node('summary', '', 'Internet & information habits'));
+    const access = node('label', 'check-label'); const checkbox = node('input'); checkbox.type = 'checkbox';
+    checkbox.dataset.castOnline = 'access'; checkbox.checked = character.online?.access === true;
+    access.append(checkbox, document.createTextNode('Has internet access')); habits.append(access);
+    for (const [key, label] of [['interests', 'Interests / communities (comma separated)'], ['connections', 'Followed character names (comma separated)']]) {
+      const wrapper = node('label', '', label), field = node('input'); field.dataset.castOnline = key;
+      field.value = (character.online?.[key] || []).join(', '); wrapper.append(field); habits.append(wrapper);
+    }
+    card.append(habits);
+    $('cast-list').append(card);
+    return card;
+  }
+  function collectSetup() {
+    return {
+      title: $('setup-title').value.trim(), premise: $('setup-premise').value.trim(),
+      persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
+      characters: [...$('cast-list').querySelectorAll('.cast-card')].map((card) => {
+        const character = {};
+        if (card.castOnline) character.online = structuredClone(card.castOnline);
+        card.querySelectorAll('[data-cast-field]').forEach((field) => { character[field.dataset.castField] = field.value.trim(); });
+        character.online = { access: card.querySelector('[data-cast-online="access"]').checked };
+        for (const key of ['interests', 'connections']) character.online[key] = card.querySelector(`[data-cast-online="${key}"]`).value.split(',').map(item => item.trim()).filter(Boolean);
+        return character;
+      }),
+    };
+  }
+  function populateSetup(setup) {
+    $('setup-title').value = setup.title || '';
+    $('setup-premise').value = setup.premise || '';
+    $('persona-name').value = setup.persona?.name || '';
+    $('persona-description').value = setup.persona?.description || '';
+    $('cast-list').replaceChildren();
+    for (const character of setup.characters || []) addCharacter(character);
+    $('cast-list').closest('details').open = Boolean(setup.characters?.length);
+  }
+  function openSetup(setup) {
+    if (state.operation || state.selecting || state.setupLoading) return;
+    setDrawer(false);
+    populateSetup(setup || storage.json('setup-draft') || {});
+    inlineError('setup-error', null);
+    hide('setup-pending');
+    $('load-setup').disabled = !storage.get('saved-setup');
+    openDialog('setup-dialog', 'setup-title');
+  }
+  $('new-story').addEventListener('click', () => openSetup());
+  $('welcome-start').addEventListener('click', () => openSetup());
+  $('add-character').addEventListener('click', () => {
+    const card = addCharacter();
+    card.querySelector('input').focus();
+  });
+  $('setup-form').addEventListener('input', () => storage.set('setup-draft', JSON.stringify(collectSetup())));
+  $('save-setup').addEventListener('click', () => {
+    storage.set('saved-setup', JSON.stringify(collectSetup()));
+    $('load-setup').disabled = false; toast('Setup saved in this browser for reuse.');
+  });
+  $('load-setup').addEventListener('click', () => {
+    const setup = storage.json('saved-setup');
+    if (setup) { populateSetup(setup); toast('Saved setup loaded. Edit any detail before beginning.'); }
+  });
+  $('setup-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.setupLoading) return;
+    const setup = collectSetup();
+    if (!setup.title || !setup.premise || !setup.persona.name) {
+      inlineError('setup-error', 'Add a title, premise, and persona name to begin.'); return;
+    }
+    state.setupLoading = true;
+    storage.set('setup-draft', JSON.stringify(setup));
+    inlineError('setup-error', null); hide('setup-pending', false);
+    $('setup-form').querySelectorAll('input,textarea,button').forEach((field) => { field.disabled = true; });
+    $('create-story').textContent = 'Opening your story…';
+    updateControls();
+    try {
+      const story = await api('/api/stories', { method: 'POST', body: setup });
+      persistComposer(); stopPolling();
+      state.selection++;
+      state.transcriptKey = '';
+      applyStory(story, { forceBottom: true });
+      $('composer').value = ''; resizeComposer();
+      storage.set('last-story', story.id);
+      state.setupLoading = false;
+      closeDialog('setup-dialog');
+      refreshLibrary(); schedulePolling();
+    } catch (error) {
+      inlineError('setup-error', error);
+      refreshLibrary();
+    } finally {
+      state.setupLoading = false;
+      $('setup-form').querySelectorAll('input,textarea,button').forEach((field) => { field.disabled = false; });
+      $('load-setup').disabled = !storage.get('saved-setup');
+      hide('setup-pending'); $('create-story').textContent = 'Open the first page →';
+      updateControls();
+    }
+  });
+
+  function populateSettings() {
+    if (!state.settings) return;
+    for (const key of settingsFields) {
+      const field = $(`setting-${key}`);
+      if (field.type === 'checkbox') field.checked = Boolean(state.settings[key]);
+      else {
+        const value = state.settings[key] ?? '';
+        if (field.tagName === 'SELECT' && ![...field.options].some((option) => option.value === String(value))) {
+          const option = node('option', '', String(value)); option.value = String(value); field.append(option);
+        }
+        field.value = value;
+      }
+    }
+    $('setting-requestTimeout').value = Math.round((state.settings.requestTimeoutMs || 180000) / 1000);
+  }
+  $('open-settings').addEventListener('click', () => {
+    setDrawer(false); populateSettings(); inlineError('settings-error', null);
+    $('save-settings').disabled = !state.settings;
+    $('check-models').disabled = !state.settings;
+    if (!state.settings) inlineError('settings-error', 'Settings are unavailable until the local server connects. Close this window and retry the library.');
+    openDialog('settings-dialog');
+  });
+  $('settings-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.settingsLoading || !state.settings) return;
+    const settings = {};
+    for (const key of settingsFields) {
+      const field = $(`setting-${key}`);
+      settings[key] = field.type === 'checkbox' ? field.checked : numericSettings.has(key) ? Number(field.value) : field.value;
+    }
+    settings.requestTimeoutMs = Number($('setting-requestTimeout').value) * 1000;
+    state.settingsLoading = true;
+    $('save-settings').disabled = true;
+    $('save-settings').textContent = 'Saving…';
+    $('check-models').disabled = true;
+    inlineError('settings-error', null);
+    try {
+      state.settings = await api('/api/settings', { method: 'PUT', body: settings });
+      populateSettings(); toast('Settings saved. New generations use these prompts.');
+      await checkModels();
+    } catch (error) { inlineError('settings-error', error); }
+    finally {
+      state.settingsLoading = false;
+      $('save-settings').disabled = false; $('save-settings').textContent = 'Save settings';
+      $('check-models').disabled = false;
+    }
+  });
+  async function checkModels() {
+    $('check-models').disabled = true;
+    $('model-result').textContent = 'Checking the saved proxy connection…';
+    try {
+      const result = await api('/api/models');
+      state.connection = Boolean(result.connected);
+      $('connection').dataset.connected = String(state.connection);
+      $('connection-text').textContent = state.connection ? 'Subscription proxy connected' : 'Proxy disconnected';
+      $('model-result').textContent = result.connected
+        ? `Connected · ${(result.models || []).length} models available. Uses the saved connection settings.`
+        : `${result.error || 'Proxy unavailable.'} Start the local proxy, sign in with your ChatGPT account, and check the saved base URL.`;
+      $('model-options').replaceChildren();
+      for (const model of result.models || []) {
+        const option = node('option'); option.value = model.id; option.label = model.name || model.id;
+        $('model-options').append(option);
+      }
+    } catch (error) {
+      state.connection = false;
+      $('connection').dataset.connected = 'false';
+      $('connection-text').textContent = 'Connection unavailable';
+      $('model-result').textContent = error.message;
+    } finally { $('check-models').disabled = state.settingsLoading; }
+  }
+  $('check-models').addEventListener('click', () => {
+    if (state.settings && $('setting-proxyBaseUrl').value !== state.settings.proxyBaseUrl) {
+      $('model-result').textContent = 'Save the changed proxy URL first. Connection checks use the saved settings.'; return;
+    }
+    checkModels();
+  });
+
+  $('open-story-menu').addEventListener('click', () => openDialog('story-menu-dialog'));
+  $('reuse-story').addEventListener('click', () => {
+    const setup = state.story?.setup;
+    closeDialog('story-menu-dialog');
+    if (setup) openSetup(setup);
+  });
+  $('export-story').addEventListener('click', async () => {
+    if (!state.story) return;
+    const id = state.story.id;
+    const title = state.story.title;
+    $('export-story').disabled = true;
+    try {
+      const data = await api(storyPath(id, '/export'));
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = node('a'); link.href = url;
+      link.download = `${String(title).replace(/[^a-z\d_-]+/gi, '-').slice(0, 80) || 'hearth-story'}.json`;
+      document.body.append(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      closeDialog('story-menu-dialog'); toast('Complete story export downloaded.');
+    } catch (error) { showError(error); closeDialog('story-menu-dialog'); }
+    finally { $('export-story').disabled = false; }
+  });
+  $('import-story').addEventListener('click', () => $('import-file').click());
+  $('import-file').addEventListener('change', async () => {
+    const file = $('import-file').files[0];
+    $('import-file').value = '';
+    if (!file || state.operation || state.selecting) return;
+    if (file.size > 64 * 1024 * 1024) { showError('This export exceeds the server’s 64 MiB import limit.'); return; }
+    let data;
+    try { data = JSON.parse(await file.text()); }
+    catch { showError('This file is not valid story JSON. Choose a Hearth story export.'); return; }
+    persistComposer(); setDrawer(false);
+    state.operation = { id: null, generating: false };
+    updateControls(); renderLibrary(); clearError();
+    try {
+      const story = await api('/api/import', { method: 'POST', body: data });
+      stopPolling(); state.selection++; state.transcriptKey = '';
+      applyStory(story, { forceBottom: true });
+      $('composer').value = ''; resizeComposer();
+      storage.set('last-story', story.id);
+      toast('Story imported as a new library entry.');
+    } catch (error) { showError(error); }
+    finally { state.operation = null; updateControls(); renderLibrary(); schedulePolling(); }
+  });
+  $('remove-story').addEventListener('click', () => {
+    if (!state.story || locked()) return;
+    const story = state.story;
+    $('confirm-title').textContent = 'Delete this story?';
+    $('confirm-description').textContent = `“${story.title}” and all its branches will be removed from this server. Export it first if you want to keep a copy.`;
+    inlineError('confirm-error', null);
+    state.confirmAction = async () => {
+      if (state.operation || state.story?.id !== story.id) return;
+      state.operation = { id: story.id, generating: false };
+      updateControls(); renderLibrary();
+      try { await api(storyPath(story.id), { method: 'DELETE' }); }
+      catch (error) {
+        state.operation = null; updateControls(); renderLibrary(); throw error;
+      }
+      stopPolling(); state.selection++;
+      state.stories = state.stories.filter((item) => item.id !== story.id);
+      state.story = null; state.transcriptKey = '';
+      state.operation = null;
+      storage.remove('last-story'); storage.remove(`draft:${story.id}`);
+      $('conversation').replaceChildren(); $('composer').value = '';
+      $('story-title').textContent = 'Make yourself at home.';
+      $('header-kicker').textContent = 'A PLACE FOR STORIES';
+      document.title = 'Hearth · A place for stories';
+      hide('story-tools'); hide('writing-area'); hide('conversation'); hide('welcome', false);
+      hide('jump-latest'); clearError(); renderLibrary(); updateControls();
+      closeDialog('confirm-dialog'); toast('Story removed from your library.');
+    };
+    closeDialog('story-menu-dialog'); openDialog('confirm-dialog');
+  });
+  $('confirm-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!state.confirmAction || $('confirm-action').disabled) return;
+    $('confirm-action').disabled = true;
+    inlineError('confirm-error', null);
+    try { await state.confirmAction(); }
+    catch (error) { inlineError('confirm-error', error); }
+    finally { $('confirm-action').disabled = false; }
+  });
+  $('dismiss-error').addEventListener('click', clearError);
+  $('retry-load').addEventListener('click', () => {
+    if (!state.booted) bootstrap();
+    else if (state.failedSelection) selectStory(state.failedSelection);
+    else if (state.story) selectStory(state.story.id);
+    else bootstrap();
+  });
+  window.addEventListener('pagehide', () => { persistComposer(); stopPolling(); });
+  window.addEventListener('pageshow', (event) => { if (event.persisted) schedulePolling(); });
+
+  async function bootstrap() {
+    clearError(); $('retry-load').disabled = true;
+    try {
+      const data = await api('/api/bootstrap');
+      state.settings = data.settings;
+      state.stories = data.stories || [];
+      state.booted = true;
+      $('app-version').textContent = data.version || '1.0.0';
+      populateSettings(); renderLibrary(); updateControls();
+      const lastId = storage.get('last-story');
+      if (lastId && state.stories.some((story) => story.id === lastId)) await selectStory(lastId);
+      checkModels();
+    } catch (error) {
+      showError(error, true);
+      $('story-list').replaceChildren(node('p', 'library-note muted', 'Your library is unavailable. Reconnect to the local server and retry.'));
+      updateControls();
+    } finally { $('retry-load').disabled = false; }
+  }
+  bootstrap();
+})();

@@ -1,6 +1,6 @@
 # Roleplay design discussion
 
-Status: planning. Accepted requirements and proposed behavior are distinguished below; this is not an implementation specification.
+Status: implemented as a local first version. Accepted requirements and the design reasoning are retained below. See README.md for setup and docs/implementation-contract.md for module interfaces.
 
 ## Accepted requirements
 
@@ -54,7 +54,7 @@ Status: planning. Accepted requirements and proposed behavior are distinguished 
 - External displacement is distinct from a voluntary decision: the narrator can resolve someone being carried out without inventing their consent.
 - Reconcile a newcomer's proposed background with established events before activation. Creating a character must not invent past witnesses or disclose existing secrets without a justified source.
 - Player-visible narration does not automatically become character-visible information. Silent witnesses can receive observations without an AI generation call.
-- If a later generation fails, retain already committed events and resume at the next event boundary. Incomplete generated proposals must not update presence or knowledge. Rewind invalidates later derived state and late generation results together.
+- Complete turns commit atomically. If generation fails or is cancelled, retain the prior complete history; incomplete proposals do not update presence or knowledge. Rewind invalidates later derived state and late generation results together.
 
 ## Proposed continuous conversation and knowledge design
 
@@ -87,11 +87,11 @@ Status: planning. Accepted requirements and proposed behavior are distinguished 
 - Keep later branches separate from the active timeline. No discarded event may remain available through prompts, summaries, retrieval, or a global public-information cache.
 - Rewind controls should distinguish continuing after a retained message from undoing that message. The same interface can support replacing a message by rewinding to its preceding boundary.
 
-## Open design decisions
+## Implementation choices
 
-- Off-scene activity: continuously simulated, or advanced only when time passes or a relevant event justifies it? Recommendation: advance on relevant events and elapsed story time, without calling every character every turn.
-- Interaction structure is settled at the user interface level: one continuous conversation with internal location and event management. The scope of autonomous off-screen developments still needs to be settled.
-- Private input presentation: natural prose plus optional explicit markers is proposed; exact conventions and ambiguity handling remain to be refined.
+- Off-scene activity advances through relevant events and elapsed story time, without calling every character every turn.
+- Interaction structure is one continuous conversation with internal location and event management.
+- Private input supports natural prose plus optional explicit [OOC: ...] and [THOUGHT: ...] markers. Ambiguous unclassified fragments remain narrator-only.
 - Branch retention after edits/deletions is settled: preserve the original continuation separately and generate a revised continuation. Pure rewind should use the same branch mechanism.
 
 ## Proposed prompts, illustration continuity, and message controls
@@ -109,6 +109,13 @@ Status: planning. Accepted requirements and proposed behavior are distinguished 
 - Generate from the revised boundary without inventing new player choices or silently treating the original branch's later player actions as if they already happened in the revised branch.
 
 Proxy reference: https://github.com/EvanZhouDev/openai-oauth/blob/main/packages/core/src/images.ts.
+
+## Long-story continuity
+
+- Original observations and events remain in saved checkpoints for inspection and rewind.
+- Older character observations are summarized using only that character's own supplied knowledge, without supplying other private state. Actor contexts receive that summary plus recent verbatim observations.
+- The narrator maintains separate private continuity notes. Its request projection reduces repeated archived events and observations while retaining current whereabouts, relevant publications, and summaries.
+- Summaries are branch state, not global caches. Rewinding restores the summaries appropriate to the chosen boundary.
 
 ## Old project lessons
 
