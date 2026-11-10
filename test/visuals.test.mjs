@@ -25,6 +25,7 @@ function scripted({plan,act,onVisual}={}) {
       if(hood)return JSON.stringify({patches:[{characterId:'player',set:[patch(hood,'hood','presentation','raised hood','raised hood'),patch(hood,'hair','physical','black hair','')],remove:[]}]});
       return '{"patches":[]}';
     }
+    if(system.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null,"placements":[]}';
     if(system.includes('private input interpreter')){assert.equal(request.model,'helper-model');return JSON.stringify({segments:[{kind:'action',text:data.input}],allowMajorTimeSkip:false});}
     assert.equal(request.model,'actor-model');
     if(system.includes('omniscient narrator/planner'))return JSON.stringify(plan?plan(data):{events:[],speakers:[],text:'The room is quiet.'});

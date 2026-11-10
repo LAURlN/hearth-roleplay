@@ -15,6 +15,7 @@ function fakeProvider() {
     if(fake.fail) throw new Error('Scripted provider failure');
     const system=request.messages[0].content;
     if(system.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
+    if(system.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null,"placements":[]}';
     const raw=request.messages[1].content;
     const payload=JSON.parse(Array.isArray(raw)?raw[0].text:raw);
     if(system.includes('private input interpreter')) {

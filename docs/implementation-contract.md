@@ -4,6 +4,8 @@ Working title: Hearth. Local-only, buildless, dependency-free Node 22+ app. Root
 
 ## Engine contract
 
+Player placement: input interpretation receives recent narrator history. A separate helper resolves omitted destinations for completed observable action segments, including object interactions that establish presence. It can repair a stale current location only from retained player-action excerpts with valid checkpoint boundaries and no later established player movement. A private or speech segment cannot authorize placement. Completed new action segments carry placementResolved; playerPlacementCheckedAt prevents repeatedly reviewing the same legacy checkpoint. Internal placement_correction events synchronize records without arrival/departure observations or retroactive dialogue grants. Local NPC text resolves at that NPC's actual location even off-scene; explicit recipient presence is validated and only player-delivered observations become character messages.
+
 Export createInitialState(setup), runTurn(options), applyAuthoredMessage(options), characterContext(state, characterId), parseJson(text), and optionally helpers. Pure world/state transformations; no filesystem/network imports. Use node:crypto for IDs. Complete inputs/outputs are serializable plain objects.
 
 setup = {title, premise, persona:{name,description}, characters:[{name,description,appearance,personality,goals,location,online?}]}. Defaults permitted. Character IDs assigned deterministically within the saved setup using random UUID once at initialization. Player is a distinct character with id 'player'; never generate their dialogue or choices.
