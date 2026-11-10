@@ -59,6 +59,10 @@ Enter a premise, a player persona, and optionally a few predefined characters. S
 
 The general roleplay prompt and illustrator prompt are separate editable settings. Prompt changes apply to future requests. There are no combat stats, rewards, equipment generators, or player-managed scene modes.
 
+Settings also has an optional **Helper model**, used for input interpretation, new-character context curation and memory summaries. Enter a model ID offered by your subscription proxy (for example, your available Luna model); blank uses the chat model. Narration and character replies continue to use the chat model. This is explicit task routing, with no automatic model fallback.
+
+When a previously described background person becomes a speaking character, an independent context curator reads the narrator's available history and world context. It preserves their established identity and selects evidenced observations for their starting context. Memories must cite exact excerpts from eligible sources, with an earlier narrator passage establishing that background person; a genuine newcomer receives no retrospective memories. The curator must judge identity, historical presence and perception semantically. Source checks constrain invented information but cannot guarantee perfect model judgment. Identifiable people should be registered from their first appearance; silent registered characters already retain observations without actor generation calls. Older observations without delivery provenance are conservatively excluded from retrospective event sources.
+
 ## Privacy within the fiction
 
 Write naturally. For unambiguous private content, use:
@@ -93,6 +97,10 @@ Stories, branch snapshots, settings, and images live in `data/` beside the app. 
 Set `HEARTH_DATA_DIR` to use another data directory. Keep one Hearth process per data directory. The server binds only to loopback and does not expose your proxy to a network. Hearth never reads the proxy's OAuth credential file.
 
 ## Verification
+
+For troubleshooting, open **Story options → AI debug log**. Refresh, select/copy the text, use Copy all, or Download .txt. The local log includes prepared prompts, exact text replies, selected models, stages, request IDs, branches and errors, including failed/cancelled attempts. Empty or rejected text responses retain the proxy response for diagnosis. Illustrator prompts are included; image bytes are represented by metadata and hashes.
+
+Logs begin with requests after this update; older prompts cannot be recovered. They live under ignored `data/debug/`, are excluded from story exports, and are removed when their story is deleted. Rewind restores fictional knowledge but retains the debugging record of abandoned attempts. Logs contain all private character contexts, thoughts and OOC, so inspect them before sharing. Transport headers and OAuth credentials are never logged.
 
 ```sh
 npm run check

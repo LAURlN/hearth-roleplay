@@ -10,3 +10,5 @@ dialog{width:min(540px,calc(100% - 32px));max-height:calc(100dvh - 48px);border:
 .brand-mark{transform:none;flex-shrink:0}.story-heading>.eyebrow{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.inspector-card h3,.inspector-card summary,dialog h2,.intro,.notice,.field-hint{overflow-wrap:anywhere}.copy-fallback{display:block;width:calc(100% - 36px);margin:0 18px 18px;min-height:130px}.inspector-tabs{min-width:0}.inspector-tabs button{min-width:0}.gallery-grid,.branch-list,.dialog-body{min-width:0}
 @media(max-width:820px){.message-menu{min-height:44px;width:44px;flex-basis:44px}.header-tools .icon-button{width:44px;flex-basis:44px}.turn-actions .subtle,.text-button{min-height:44px}.send-button{height:44px;min-height:44px;flex-basis:44px}.header-tools>.subtle{min-height:44px}.composer-foot{margin-top:0}.composer-foot>span{max-width:60%;text-align:right}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;transition:none!important}}
+
+.debug-text{font:12px/1.6 ui-monospace,monospace;min-height:35dvh;white-space:pre;overflow:auto}.debug-actions{flex-wrap:wrap}

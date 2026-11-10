@@ -51,3 +51,23 @@ Base: 1f35511a911ee648f91ed0a8175de0eb6ed9cd68. User reported `URL scheme must b
 Image-containing text requests now use the same loopback subscription proxy's native `/responses` endpoint, preserving inline image bytes, instructions, supplied history, and model selection. Ordinary text chat and multipart image generation/edit calls keep their existing routes. Visual refusals, failed/incomplete results, and missing answers are surfaced without fallback or retry.
 
 Reviewer: Codex provider, gpt-6.1-sol on high reasoning effort. One round, verdict APPROVE, no actionable findings. Reviewer checked the scoped diff but did not rerun tests. Root ran JavaScript checks and all 66 tests successfully; the new regression failed before the fix and passed after it. One pre-existing background-job test timeout was isolated and its test helper given a real deadline and terminal-error diagnostics. Behavior/test diff: 85 insertions, 1 deletion across 3 files, before this documentation update. No findings declined; usage figures were not returned. No live OAuth or phone inference was used during verification.
+
+## Local delivery, context curation and AI debug logs
+
+Base: 2c99e38838f8f10abc000ba6798a370775cff5cd. Reproduced a missing-reply case caused by optional empty local recipient lists. These now mean ordinary local delivery, while nonempty restricted lists and required remote recipients keep their boundaries. Restricted narrator observations also respect player delivery before display.
+
+Added an independent introduction curator using a configurable helper model, with cited background identity and source excerpts for retrospective memories. Genuine arrivals receive no retrospective observations. Interpreter and memory summaries use the same explicit helper selection; blank means the selected chat model. Source/provenance checks are deterministic; interpreting identity and historical perception remains model-dependent.
+
+Per-story local debug records retain prepared prompts, raw text replies and diagnostic errors independently of story transaction rollback, including failed revisions. The UI offers selectable text, copy and .txt download. Image content is represented by metadata and hashes. Logs stay under ignored data/debug, are absent from story exports, and are deleted with the story.
+
+Pre-review checks: JavaScript syntax checks and all 75 tests passed, including local delivery, helper routing, evidenced handoff, rejected citations, restricted sources, raw empty proxy responses, failed-revision logs and deletion/late-write protection. Static DOM identifier/selector check passed. No live subscription inference, Android runtime or browser rendering test was performed.
+
+Reviewer: Codex provider, gpt-6.1-sol on high reasoning effort. Round 1 verdict CHANGES. Initial diff: 435 insertions and 43 deletions across 20 files. Reviewer independently passed syntax checks and all 75 tests on rerun after a transient Windows rename EPERM; no files changed during review.
+
+| ID | Severity | Outcome |
+| --- | --- | --- |
+| S1 | should | Fixed: story-operation and illustrator catch boundaries append terminal errors with stage/branch/turn metadata independently of rollback, covering parsing/schema/memory/decision failures after a successful provider reply. Added two HTTP regressions that failed before the fix and pass afterward. |
+
+After S1, root passed syntax checks and all 77 tests. No findings declined; usage figures were not returned. Round 2 checks only S1 and the changed error boundaries.
+
+Round 2 verdict APPROVE: S1 resolved and no related regressions found. Reviewer independently passed syntax checks, both new regressions and all 77 tests on rerun; the initial full run encountered the same transient Windows rename EPERM. No files changed during review. Two rounds total with gpt-6.1-sol on high reasoning effort. Diff after S1 before this final ledger entry: 484 insertions and 43 deletions across 20 files. The increase adds terminal error boundaries and two regression tests. No findings declined; usage figures were not returned. User-authorized publication follows approval. Live OAuth, Android runtime and browser rendering remain untested.

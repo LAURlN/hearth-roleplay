@@ -3,9 +3,10 @@ import { makeId, clone, branchWorld, publicStory } from './store.mjs';
 import { createProvider } from './provider.mjs';
 import { Illustrator } from './illustrator.mjs';
 import { compactKnowledge,narratorProjection } from './memory.mjs';
+import { loggedProvider,formatDebugLog,appendDebugError } from './debug-log.mjs';
 
 const failure=(message,status=400,code)=>Object.assign(new Error(message),{status,code});
-const transcript=messages=>messages.map(({snapshot,...message})=>message);
+const transcript=messages=>messages.map(({snapshot,...message})=>({...message,storyTime:message.storyTime??snapshot?.time}));
 function text(value,name,limit=60000,empty=false) { if(typeof value!=='string'||(!empty&&!value.trim())||value.length>limit) throw failure(`Invalid ${name}.`);return value; }
 export function validateSetup(input) {
   if(!input||typeof input!=='object'||Array.isArray(input)) throw failure('Invalid story setup.');
@@ -28,9 +29,9 @@ export class StoryService {
   async view(id) { return publicStory(await this.store.get(id),this.busy.get(id)); }
   ensureFree(id) { if(this.busy.has(id)) throw failure('This story is already generating. Stop it or wait for the current turn.',409,'STORY_BUSY'); }
   assertVersion(story,version) {if(!Number.isInteger(version)||version!==story.version) throw failure('This story changed. Refresh it before trying again.',409,'STALE_STORY');}
-  env(settings,lease) {
-    const provider=this.makeProvider(settings);
-    return {settings,complete:request=>{
+  env(settings,lease,traceContext) {
+    const provider=loggedProvider(this.makeProvider(settings),{store:this.store,settings,getContext:()=>({...traceContext,stage:lease.stage})});
+    return {settings,traceContext,complete:request=>{
       const prepared=clone(request.messages);
       for(const message of prepared) {
         if(message.role!=='user'||typeof message.content!=='string')continue;
@@ -52,15 +53,20 @@ export class StoryService {
   async operation(id,version,work,{illustrate=true,interruptImages=false}={}) {
     this.ensureFree(id);
     const lease={controller:new AbortController(),stage:'Preparing the story…'};
+    let traceContext;
     this.busy.set(id,lease);
     try {
       if(interruptImages) await this.illustrator.cancel(id);
       const settings=await this.store.settings();
       await this.store.mutate(id,version,async story=>{
         this.assertVersion(story,version);
-        await work(story,this.env(settings,lease));
+        traceContext={storyId:id,branchId:story.activeBranchId,turnId:makeId(),anchorMessageId:story.branches[story.activeBranchId].messages.at(-1)?.id};
+        await work(story,this.env(settings,lease,traceContext));
         lease.controller.signal.throwIfAborted();
       });
+    } catch(error) {
+      if(traceContext)await appendDebugError(this.store,{...traceContext,stage:lease.stage,operation:'story',terminal:true},error).catch(()=>{});
+      throw error;
     } finally {if(this.busy.get(id)===lease) this.busy.delete(id);}
     if(illustrate) await this.illustrator.schedule(id).catch(()=>{});
     return this.view(id);
@@ -86,6 +92,9 @@ export class StoryService {
       const messages=clone(old.messages.slice(0,retainedCount));
       let state=clone(messages.at(-1)?.snapshot??old.initialState);
       const newId=makeId();
+      env.traceContext.branchId=newId;
+      env.traceContext.parentBranchId=old.id;
+      env.traceContext.anchorMessageId=input.messageId;
       const branch={id:newId,name:`${mode==='edit'?'Revision':mode==='delete'?'Without passage':'Continuation'} ${Object.keys(story.branches).length}`,parentId:old.id,forkMessageId:input.messageId??null,createdAt:new Date().toISOString(),initialState:clone(old.initialState),messages,illustrations:clone(old.illustrations.filter(image=>messages.some(m=>m.id===image.anchorMessageId)))};
       if(mode==='edit') {
         const edited={...clone(old.messages[index]),id:makeId(),text:input.text,createdAt:new Date().toISOString()};delete edited.snapshot;
@@ -122,6 +131,7 @@ export class StoryService {
     for(const branch of Object.values(story.branches)) for(const image of branch.illustrations) if(!images[image.url]) images[image.url]=(await this.store.image(image.url)).toString('base64');
     return {format:'hearth-story',formatVersion:1,exportedAt:new Date().toISOString(),story,images};
   }
+  async debug(id) { const story=await this.store.get(id);return formatDebugLog(await this.store.debugRecords(id),{storyId:id,title:story.title}); }
   async import(data) {
     if(data?.format!=='hearth-story'||data.formatVersion!==1||!data.story||!data.images||typeof data.images!=='object') throw failure('Choose a Hearth story export.');
     const story=clone(data.story);story.setup=validateSetup(story.setup);

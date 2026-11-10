@@ -16,7 +16,7 @@ Maintain visual continuity through the supplied illustration history and actual 
 
 Return ONLY JSON with {"generate":true|false,"reason":"short explanation","caption":"short accessible description","prompt":"complete image instruction if generating","characterIds":["depicted character IDs"],"referenceIds":["relevant supplied image IDs, at most five"],"appearanceNotes":"established visual details to retain"}. The prompt must stand on its own, state which supplied references show which characters, and describe composition, action, environment, mood and style. Avoid copying the same composition when the scene has changed.`;
 
-export const DEFAULT_SETTINGS = Object.freeze({ proxyBaseUrl:'http://127.0.0.1:10531/v1', chatModel:'gpt-6.1-sol', imageModel:'gpt-image-2', roleplayPrompt:ROLEPLAY_PROMPT, illustratorPrompt:ILLUSTRATOR_PROMPT, autoIllustrate:true, imageCooldown:3, imageQuality:'medium', imageSize:'1024x1024', maxResponders:3, contextMessages:24, requestTimeoutMs:180000 });
+export const DEFAULT_SETTINGS = Object.freeze({ proxyBaseUrl:'http://127.0.0.1:10531/v1', chatModel:'gpt-6.1-sol', helperModel:'', imageModel:'gpt-image-2', roleplayPrompt:ROLEPLAY_PROMPT, illustratorPrompt:ILLUSTRATOR_PROMPT, autoIllustrate:true, imageCooldown:3, imageQuality:'medium', imageSize:'1024x1024', maxResponders:3, contextMessages:24, requestTimeoutMs:180000 });
 
 export function validateProxyUrl(value) {
   let url;
@@ -29,6 +29,8 @@ export function normalizeSettings(input = {}, base = DEFAULT_SETTINGS) {
   const settings = {...base};
   for (const key of Object.keys(DEFAULT_SETTINGS)) if (input[key] !== undefined) settings[key] = input[key];
   settings.proxyBaseUrl = validateProxyUrl(settings.proxyBaseUrl);
+  if(typeof settings.helperModel!=='string'||settings.helperModel.length>150)throw new Error('Invalid helperModel.');
+  settings.helperModel=settings.helperModel.trim();
   for (const key of ['chatModel','imageModel','roleplayPrompt','illustratorPrompt']) {
     if (typeof settings[key] !== 'string' || !settings[key].trim() || settings[key].length > (key.endsWith('Prompt') ? 60000 : 150)) throw new Error(`Invalid ${key}.`);
   }

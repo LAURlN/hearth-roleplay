@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename, unlink, readdir, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, unlink, readdir, realpath, appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { DEFAULT_SETTINGS, normalizeSettings } from './settings.mjs';
@@ -10,8 +10,8 @@ export const branchWorld = branch => clone(branch.messages.at(-1)?.snapshot ?? b
 export const assertId = id => { if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw Object.assign(new Error('Invalid identifier.'),{status:400}); return id; };
 
 export class Store {
-  constructor(directory) { this.directory = directory; this.locks = new Map(); }
-  async init() { await mkdir(path.join(this.directory,'stories'),{recursive:true}); await mkdir(path.join(this.directory,'images'),{recursive:true}); }
+  constructor(directory) { this.directory = directory; this.locks = new Map(); this.deletedIds = new Set(); }
+  async init() { await mkdir(path.join(this.directory,'stories'),{recursive:true}); await mkdir(path.join(this.directory,'images'),{recursive:true}); await mkdir(path.join(this.directory,'debug'),{recursive:true}); }
   async atomic(filename, value) {
     const temp = `${filename}.${makeId()}.tmp`;
     try { await writeFile(temp,typeof value==='string'?value:JSON.stringify(value),{mode:0o600,flush:true}); await rename(temp,filename); }
@@ -54,7 +54,20 @@ export class Store {
     }));
     return results.filter(Boolean).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   }
-  async remove(id) { await this.exclusive(id,()=>unlink(this.filename(id))); }
+  debugFilename(id) { return path.join(this.directory,'debug',assertId(id)+'.jsonl'); }
+  async appendDebug(id,record) {
+    return this.exclusive(`debug:${id}`,async()=>{
+      if(this.deletedIds.has(id))return;
+      await appendFile(this.debugFilename(id),'\n'+JSON.stringify(record)+'\n',{mode:0o600});
+    });
+  }
+  async debugRecords(id) {
+    return this.exclusive(`debug:${id}`,async()=>{
+      let contents;try{contents=await readFile(this.debugFilename(id),'utf8');}catch(error){if(error.code==='ENOENT')return [];throw error;}
+      return contents.split('\n').filter(line=>line.trim()).map(line=>{try{return JSON.parse(line);}catch{return {kind:'incomplete record',error:line};}});
+    });
+  }
+  async remove(id) { await this.exclusive(id,async()=>{await unlink(this.filename(id));this.deletedIds.add(id);await this.exclusive(`debug:${id}`,()=>unlink(this.debugFilename(id)).catch(error=>{if(error.code!=='ENOENT')throw error;}));}); }
   imagePath(name) { if(!/^[a-zA-Z0-9_-]+\.(png|jpg|webp)$/.test(name)) throw Object.assign(new Error('Invalid image path.'),{status:400}); return path.join(this.directory,'images',name); }
   async saveImage(bytes, extension='png') { const name=`${makeId()}.${extension}`; await writeFile(this.imagePath(name),bytes,{mode:0o600}); return `/images/${name}`; }
   async image(url) { return readFile(this.imagePath(String(url).split('/').at(-1))); }

@@ -57,11 +57,15 @@ export async function createApp({dataDir=process.env.HEARTH_DATA_DIR||path.join(
       if(method==='GET'&&pathname==='/api/stories') return send(await store.list());
       if(method==='POST'&&pathname==='/api/stories') return send(await service.create(await jsonBody(request)),201);
       if(method==='POST'&&pathname==='/api/import') return send(await service.import(await jsonBody(request,64*1024*1024)),201);
-      const route=/^\/api\/stories\/([a-zA-Z0-9_-]{1,100})(?:\/(turn|continue|cancel|branch|switch|illustrate|export))?$/.exec(pathname);
+      const route=/^\/api\/stories\/([a-zA-Z0-9_-]{1,100})(?:\/(turn|continue|cancel|branch|switch|illustrate|export|debug))?$/.exec(pathname);
       if(route) {
         const [,id,action]=route;
         if(method==='GET'&&!action) return send(await service.view(id));
         if(method==='DELETE'&&!action) return send(await service.remove(id));
+        if(method==='GET'&&action==='debug') {
+          const log=await service.debug(id);
+          response.writeHead(200,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});response.end(log);return;
+        }
         if(method==='GET'&&action==='export') {
           response.setHeader('Content-Disposition',`attachment; filename="hearth-${id}.json"`);
           return send(await service.export(id));

@@ -21,13 +21,13 @@ function fakeProvider() {
         fake.entered?.();
         await new Promise((resolve,reject)=>{fake.release=resolve;request.signal.addEventListener('abort',()=>reject(request.signal.reason),{once:true});});
       }
-      return JSON.stringify({segments:[{kind:'speech',text:payload.input}],allowMajorTimeSkip:false});
+      return JSON.stringify({segments:[{kind:'speech',text:payload.input,recipients:[]}],allowMajorTimeSkip:false});
     }
     if(system.includes('omniscient narrator/planner')) {
       const opening=payload.world.location==='Opening location';
       return JSON.stringify({events:opening?[{type:'establish',location:'The inn',label:'Evening',text:'A fire warms the inn.'}]:[],text:'Rain taps against the windows.',speakers:payload.world.characters.filter(c=>c.id!=='player').slice(0,1).map(c=>c.id)});
     }
-    if(system.includes('play ONLY')) return JSON.stringify({text:'Welcome. Sit by the fire.',privateState:'I am curious about this traveller.',movement:null,channel:'local'});
+    if(system.includes('play ONLY')) return JSON.stringify({text:'Welcome. Sit by the fire.',privateState:'I am curious about this traveller.',movement:null,channel:'local',recipients:[]});
     if(system.includes('A human has authored an edited')) return JSON.stringify({events:[{type:'observation',text:payload.message.text,location:payload.world.location}],allowMajorTimeSkip:false});
     if(system.includes('You are the illustrator')) return JSON.stringify({generate:true,prompt:'Draw the inn and the traveller beside the fire.',caption:'The inn at dusk',characterIds:payload.characters.map(c=>c.id),referenceIds:[],appearanceNotes:'Ada wears a red scarf.'});
     if(system.includes('brief player-visible pause')) return JSON.stringify({text:'The fire settles.'});
@@ -72,6 +72,7 @@ test('HTTP bootstrap, static assets, local origin guard, and settings validation
 test('complete story turn is durable and exposes no internal snapshots to the UI',async t=>{
   const f=await fixture(t),created=await f.request('/api/stories','POST',setup),story=created.body;
   assert.equal(created.status,201);assert.ok(story.branch.messages.length>=2);assert.equal(story.world.location,'The inn');assert.equal(story.version,1);
+  assert.ok(story.branch.messages.some(m=>m.role==='character'&&m.text==='Welcome. Sit by the fire.'));
   assert.ok(story.branch.messages.every(message=>!Object.hasOwn(message,'snapshot')));
   const advanced=(await f.request(route(story)+'/turn','POST',{text:'I order tea.',expectedVersion:story.version})).body;
   assert.equal(advanced.version,2);assert.ok(advanced.branch.messages.some(m=>m.text==='I order tea.'));
@@ -103,6 +104,58 @@ test('failed generation is atomic and a failed opening leaves the authored setup
   const unchanged=(await f.request(route(story))).body;assert.deepEqual(unchanged.branch,story.branch);assert.equal(unchanged.version,story.version);
   const failed=await f.request('/api/stories','POST',{...setup,title:'Recover me'});assert.equal(failed.status,500);assert.ok(failed.body.storyId);
   const recovered=(await f.request(`/api/stories/${failed.body.storyId}`)).body;assert.equal(recovered.setup.title,'Recover me');assert.equal(recovered.branch.messages.length,0);
+});
+
+test('downloadable AI logs cover requests, failed revisions, and survive rollback without entering story exports',async t=>{
+  const f=await fixture(t);let story=(await f.request('/api/stories','POST',setup)).body;
+  story=(await f.request(route(story)+'/turn','POST',{text:'A debugging question.',expectedVersion:story.version})).body;
+  const originalBranch=story.activeBranchId;
+  const target=story.branch.messages.find(m=>m.role==='player');
+  f.fake.fail=true;
+  assert.equal((await f.request(route(story)+'/branch','POST',{mode:'edit',messageId:target.id,text:'A failed edited question.',expectedVersion:story.version})).status,500);
+  const response=await fetch(f.base+route(story)+'/debug');
+  assert.equal(response.status,200);assert.match(response.headers.get('content-type'),/text\/plain/);assert.equal(response.headers.get('cache-control'),'no-store');
+  const log=await response.text();
+  assert.match(log,/A failed edited question/);assert.match(log,/Scripted provider failure/);assert.match(log,/Ada is responding/);
+  assert.match(log,/Welcome\. Sit by the fire/);
+  const records=await f.store.debugRecords(story.id),last=records.at(-1);
+  assert.notEqual(last.branchId,originalBranch);assert.equal(last.parentBranchId,originalBranch);
+  assert.equal((await f.service.view(story.id)).activeBranchId,originalBranch);
+  const backup=(await f.request(route(story)+'/export')).body;
+  assert.ok(!JSON.stringify(backup).includes('A failed edited question.'));
+  await f.request(route(story),'DELETE');
+  assert.equal((await fetch(f.base+route(story)+'/debug')).status,404);
+  assert.deepEqual(await f.store.debugRecords(story.id),[]);
+});
+
+test('post-response helper validation failures are logged with terminal turn metadata despite rollback',async t=>{
+  const f=await fixture(t),story=(await f.request('/api/stories','POST',setup)).body;
+  await f.store.mutate(story.id,undefined,s=>{
+    const world=s.branches[s.activeBranchId].messages.at(-1).snapshot;
+    world.characters.find(c=>c.name==='Ada').knowledge=Array.from({length:180},(_,i)=>({id:`observation-${i}`,text:`Observation ${i}`,source:'perception',time:0}));
+  },{bump:false});
+  const original=await f.store.get(story.id);
+  f.fake.provider.complete=async()=>'{"summary":""}';
+  const failed=await f.request(route(story)+'/turn','POST',{text:'This must not be committed.',expectedVersion:story.version});
+  assert.equal(failed.status,500);assert.match(failed.body.error,/memory summary was invalid/);
+  assert.deepEqual(await f.store.get(story.id),original);
+  const records=await f.store.debugRecords(story.id),last=records.at(-1);
+  assert.equal(last.kind,'operation error');assert.match(last.error.message,/memory summary was invalid/);
+  assert.equal(last.branchId,story.activeBranchId);assert.equal(last.stage,"Organising Ada's memories");
+  assert.equal(last.turnId,records.at(-2).turnId);assert.equal(records.at(-2).response,'{"summary":""}');
+});
+
+test('invalid illustrator decisions retain the raw reply and a terminal illustration error',async t=>{
+  const f=await fixture(t),story=(await f.request('/api/stories','POST',setup)).body;
+  f.fake.provider.complete=async()=>'{"generate":"not a boolean"}';
+  await f.request(route(story)+'/illustrate','POST',{expectedVersion:story.version});
+  const failed=await until(()=>f.service.view(story.id),s=>s.illustrationJob.status==='failed');
+  const records=await f.store.debugRecords(story.id),last=records.at(-1);
+  assert.equal(last.kind,'operation error');assert.match(last.error.message,/invalid decision/);
+  assert.equal(last.branchId,story.activeBranchId);assert.equal(last.turnId,failed.illustrationJob.id);
+  assert.equal(last.stage,'Illustrator is deciding');assert.equal(last.anchorMessageId,story.branch.messages.at(-1).id);
+  assert.equal(records.at(-2).response,'{"generate":"not a boolean"}');
+  assert.equal(failed.branch.illustrations.length,0);
 });
 
 test('cancellation rejects concurrent turns and leaves no partial player text or knowledge',async t=>{

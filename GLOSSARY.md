@@ -15,6 +15,12 @@ _Avoid_: Character controller
 **Illustrator**:
 The observer who decides which established moments deserve an illustration and how to depict them.
 
+**Background person**:
+A person already present in the fiction whose individual perspective has not yet become active in the conversation.
+
+**Context curator**:
+The independent reader who prepares a person's perspective from evidenced history, distinguishing what that person could perceive from what only the narrator knows.
+
 **Presence**:
 A character's physical whereabouts at a particular point in the story, including their arrival at and departure from a location.
 _Avoid_: Speaking status

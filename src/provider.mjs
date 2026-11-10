@@ -35,6 +35,10 @@ function visionText(result) {
   return text;
 }
 
+function checkedResponse(result,extract) {
+  try{return extract(result);}catch(error){error.response=result;throw error;}
+}
+
 export function createProvider(settings, fetchImpl = fetch) {
   const base = validateProxyUrl(settings.proxyBaseUrl);
   async function request(path, options = {}, limit = 24 * 1024 * 1024) {
@@ -55,9 +59,10 @@ export function createProvider(settings, fetchImpl = fetch) {
     if (!response.ok) {
       let message;
       try { const body = JSON.parse(text); message = body.error?.message ?? body.detail ?? body.message; } catch {}
-      throw new ProviderError(typeof message === 'string' ? message.slice(0,1600) : `Subscription proxy returned HTTP ${response.status}.`, response.status === 429 ? 429 : 502, response.status === 429 ? 'USAGE_LIMIT' : 'PROXY_ERROR');
+      const error=new ProviderError(typeof message === 'string' ? message.slice(0,1600) : `Subscription proxy returned HTTP ${response.status}.`, response.status === 429 ? 429 : 502, response.status === 429 ? 'USAGE_LIMIT' : 'PROXY_ERROR');
+      error.response=text;throw error;
     }
-    try { return JSON.parse(text); } catch { throw new ProviderError('The proxy returned an invalid JSON response.'); }
+    try { return JSON.parse(text); } catch { const error=new ProviderError('The proxy returned an invalid JSON response.');error.response=text;throw error; }
   }
   return {
     async models() {
@@ -70,14 +75,16 @@ export function createProvider(settings, fetchImpl = fetch) {
       // downloader. Its native Responses route preserves inline image bytes.
       if(messages.some(message=>Array.isArray(message.content)&&message.content.some(part=>part?.type==='image_url'))) {
         const result=await request('/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(visionRequest(model,messages)),signal},4*1024*1024);
-        return visionText(result);
+        return checkedResponse(result,visionText);
       }
       const result = await request('/chat/completions', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model,messages,stream:false}),signal}, 4 * 1024 * 1024);
-      const choice = result.choices?.[0];
-      if (choice?.message?.refusal || choice?.finish_reason === 'content_filter') throw new ProviderError(`The model declined this request: ${choice.message.refusal ?? 'Content filter refusal.'}`, 422, 'MODEL_REFUSAL');
-      const text = choice?.message?.content;
-      if (typeof text !== 'string' || !text.trim() || choice.finish_reason === 'length') throw new ProviderError(choice?.finish_reason === 'length' ? 'The model response was incomplete. Retry the turn.' : 'The model returned no usable response.');
-      return text;
+      return checkedResponse(result,()=>{
+        const choice = result.choices?.[0];
+        if (choice?.message?.refusal || choice?.finish_reason === 'content_filter') throw new ProviderError(`The model declined this request: ${choice.message.refusal ?? 'Content filter refusal.'}`, 422, 'MODEL_REFUSAL');
+        const text = choice?.message?.content;
+        if (typeof text !== 'string' || !text.trim() || choice.finish_reason === 'length') throw new ProviderError(choice?.finish_reason === 'length' ? 'The model response was incomplete. Retry the turn.' : 'The model returned no usable response.');
+        return text;
+      });
     },
     async image({prompt,references=[],signal}) {
       const options = {model:settings.imageModel,prompt,quality:settings.imageQuality,size:settings.imageSize};

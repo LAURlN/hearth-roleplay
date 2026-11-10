@@ -112,6 +112,46 @@ test('remote senders retain their own utterance using the same event as recipien
   assert.ok(!texts(find(result.state, 'Ada')).includes('call you at dusk'));
 });
 
+test('empty local recipient lists deliver player speech and a generated answer to nearby witnesses', async () => {
+  const state = world(), ada = find(state, 'Ada'), input = '"Does the instructor lead this lesson?" [OOC: Keep the reply brief.]';
+  const responses = [
+    { segments: [{ kind: 'speech', text: '"Does the instructor lead this lesson?"', recipients: [] }, { kind: 'ooc', text: '[OOC: Keep the reply brief.]' }], allowMajorTimeSkip: false },
+    plan([{ type: 'observation', text: 'The instructor sets down a pad.', location: 'cafe', recipients: [] }], [ada.id], 'Ada is within speaking distance.'),
+    actor('Yes, the instructor leads the lesson.', { channel: 'local', recipients: [] }),
+  ];
+  const calls=[];
+  const complete=async request=>{
+    calls.push(request);
+    if(request.messages[0].content.includes('brief player-visible pause'))return JSON.stringify({text:'The room settles.'});
+    const response=responses.shift();assert.ok(response,'Unexpected completion');
+    if(response.privateState) {
+      const context=payload(request).context;
+      assert.match(texts(context),/Does the instructor/);assert.match(texts(context),/sets down a pad/);
+      assert.ok(!JSON.stringify(context).includes('Keep the reply brief'));
+    }
+    return JSON.stringify(response);
+  };
+  const result=await turn(state,complete,{input});
+  assert.equal(result.messages.filter(m=>m.role==='character').length,1,'A generated local answer must not disappear');
+  assert.equal(result.messages.find(m=>m.role==='character').text,'Yes, the instructor leads the lesson.');
+  for(const name of ['Ada','Cy'])assert.match(texts(find(result.state,name)),/instructor leads the lesson/);
+  assert.match(texts(result.state.characters.find(c=>c.id==='player')),/instructor leads the lesson/);
+  assert.ok(!texts(find(result.state,'Ben')).includes('instructor leads'));
+  assert.equal(calls.length,3,'A visible answer does not need replacement filler narration');
+});
+
+test('a restricted local whisper is not widened to the player, and empty remote lists still fail', async () => {
+  const state=world(),ada=find(state,'Ada'),cy=find(state,'Cy'),ben=find(state,'Ben');
+  const whispered=await turn(state,fake(plan([], [ada.id]),actor('A whispered aside.',{recipients:[cy.id]}),{text:'The room is quiet.'}));
+  assert.ok(!whispered.messages.some(m=>m.role==='character'));
+  assert.match(texts(find(whispered.state,'Cy')),/whispered aside/);
+  assert.ok(!texts(whispered.state.characters.find(c=>c.id==='player')).includes('whispered aside'));
+  const invalid=actor('A remote message.',{channel:'phone',recipients:[]});
+  await assert.rejects(turn(state,fake(plan([], [ben.id]),invalid,invalid)),/Remote communication needs explicit recipients/);
+  const silent=await turn(state,fake(plan([], [ada.id]),actor('',{recipients:[]}),{text:'Ada remains quiet.'}));
+  assert.ok(!silent.messages.some(m=>m.role==='character'));
+});
+
 test('a long skip resolves reading opportunities before a publication expires', async () => {
   const state = world(), ben = find(state, 'Ben');
   ben.online = { access: true, interests: [], connections: ['player'] };
@@ -430,6 +470,74 @@ test('newcomers cannot acquire story knowledge from invented historical witnessi
   const complete = fake(plan([intro]), plan([intro]));
   await assert.rejects(turn(state, complete), /public source/);
   assert.equal(state.characters.length, 4);
+});
+
+test('an independent helper restores evidenced background observations before the new actor answers', async () => {
+  const state=world();
+  const opening=await turn(state,fake(plan([],[],'A barista in a blue apron waits by the cafe counter.')));
+  const history=opening.messages;
+  const newcomer={id:'barista',name:'Dara',appearance:'Blue apron',location:'cafe'};
+  const question='"Is there a table outside?"';
+  const input=question+' [THOUGHT: I secretly own this cafe.] [OOC: Keep the weather dry.]';
+  const stages=[],models=[];
+  const responses=[
+    {segments:[{kind:'speech',text:question,recipients:[]},{kind:'thought',text:'[THOUGHT: I secretly own this cafe.]'},{kind:'ooc',text:'[OOC: Keep the weather dry.]'}],allowMajorTimeSkip:false},
+    plan([{type:'introduction',character:newcomer,reason:'Identify the barista already at the counter.'}],[newcomer.id],''),
+    request=>{
+      const data=payload(request);
+      assert.equal(data.history[0].id,history[0].id);
+      assert.ok(JSON.stringify(data.establishedWorld).includes('secretly own'));
+      assert.ok(!JSON.stringify(data.sources).includes('secretly own'));
+      const source=data.sources.find(s=>s.text===question);
+      assert.ok(source);
+      return {character:newcomer,knowledge:[],continuity:{messageId:history[0].id,excerpt:'A barista in a blue apron waits by the cafe counter.'},memories:[{sourceId:source.id,excerpt:question}]};
+    },
+    request=>{
+      const context=payload(request).context;
+      assert.ok(context.knowledge.some(k=>k.text===question && k.sourceId.startsWith('event:')));
+      assert.ok(!JSON.stringify(context).includes('secretly own'));
+      assert.ok(!JSON.stringify(context).includes('Keep the weather'));
+      assert.ok(!Object.hasOwn(payload(request),'history'));
+      return actor('Yes, beside the window.');
+    },
+  ];
+  const complete=async request=>{models.push(request.model);const response=responses.shift();assert.ok(response);return JSON.stringify(typeof response==='function'?response(request):response);};
+  const result=await turn(opening.state,complete,{input,messages:history,settings:{...settings,helperModel:'test-helper'},onStage:s=>stages.push(s)});
+  assert.deepEqual(models,['test-helper','test-model','test-helper','test-model']);
+  assert.ok(stages.includes('Preparing new character context'));
+  assert.equal(find(result.state,'Dara').continuity.messageId,history[0].id);
+  assert.ok(result.messages.some(m=>m.role==='character' && m.text==='Yes, beside the window.'));
+  assert.equal(opening.state.characters.length,4);
+  assert.ok(!result.messages[0].snapshot.characters.some(c=>c.id===newcomer.id));
+  assert.equal(responses.length,0);
+});
+
+test('curation excludes restricted and remote sources, and rejects invented citations or newcomer memories',async()=>{
+  const state=world(),ada=find(state,'Ada');
+  const observed=await turn(state,fake(plan([
+    {type:'observation',text:'The menu offers tea.',location:'cafe'},
+    {type:'observation',text:'Private whispered code.',location:'cafe',recipients:[ada.id]},
+    {type:'observation',text:'A private phone call.',channel:'phone',recipients:[ada.id]},
+  ],[],'A person in a blue apron stands at the counter.')));
+  const history=observed.messages;
+  const newcomer={id:'barista',name:'Dara',location:'cafe'};
+  const intro={type:'introduction',character:newcomer,reason:'Identify an existing background person.'};
+  const proof=history.find(m=>m.text==='A person in a blue apron stands at the counter.');
+  const publicSource=observed.state.events.find(e=>e.text==='The menu offers tea.');
+  for(const bad of [
+    {continuity:null,memories:[{sourceId:`event:${publicSource.id}`,excerpt:'The menu offers tea.'}]},
+    {continuity:{messageId:'another-branch',excerpt:proof.text},memories:[]},
+    {continuity:{messageId:proof.id,excerpt:proof.text},memories:[{sourceId:'event:invented',excerpt:'Invented secret.'}]},
+    {continuity:{messageId:proof.id,excerpt:proof.text},memories:[{sourceId:`event:${publicSource.id}`,excerpt:'Different invented wording.'}]},
+  ]) {
+    const invalid=request=>{
+      const data=payload(request);
+      assert.ok(!data.sources.some(s=>s.text==='Private whispered code.' || s.text==='A private phone call.'));
+      return {character:newcomer,knowledge:[],...bad};
+    };
+    await assert.rejects(turn(observed.state,fake(plan([intro]),invalid,invalid),{messages:history}),/inherit|source|excerpt/);
+  }
+  assert.equal(observed.state.characters.length,4);
 });
 
 test('edited player message is preserved and its time intent applies only to the regenerated continuation', async () => {

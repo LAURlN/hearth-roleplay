@@ -1,5 +1,6 @@
 import { makeId, branchWorld } from './store.mjs';
 import { parseJson } from './engine.mjs';
+import { loggedProvider,appendDebugError } from './debug-log.mjs';
 
 const imageType=url=>url.endsWith('.jpg')?'image/jpeg':url.endsWith('.webp')?'image/webp':'image/png';
 
@@ -52,8 +53,10 @@ export class Illustrator {
     },{bump:false});
   }
   async execute(storyId,story,branch,index,settings,job,manual) {
+    let stage='Illustrator is deciding';
+    const context=()=>({storyId,branchId:job.branchId,anchorMessageId:job.anchorMessageId,turnId:job.id,stage});
     try {
-      const provider=this.makeProvider(settings);
+      const provider=loggedProvider(this.makeProvider(settings),{store:this.store,settings,getContext:context});
       const world=branch.messages[index].snapshot??branchWorld(branch);
       const retained=new Set(branch.messages.slice(0,index+1).map(m=>m.id));
       const history=branch.illustrations.filter(image=>retained.has(image.anchorMessageId));
@@ -76,6 +79,7 @@ export class Illustrator {
       const refs=referencesFor(history,Array.isArray(decision.referenceIds)?decision.referenceIds:[],characterIds);
       const references=await Promise.all(refs.map(async image=>({bytes:await this.store.image(image.url),type:imageType(image.url)})));
       await this.update(storyId,job,{status:'generating'});
+      stage='Illustrator is generating an image';
       const prompt=decision.prompt+(refs.length?'\n\nReference order: '+refs.map((r,i)=>`${i+1}: ${r.caption||r.appearanceNotes||'prior established visual'}; character IDs: ${(r.characterIds??[]).join(', ')}`).join('\n'):'');
       const image=await provider.image({prompt,references,signal:job.controller.signal});
       job.controller.signal.throwIfAborted();
@@ -88,6 +92,7 @@ export class Illustrator {
         current.illustrationJob.status='completed';
       },{bump:false});
     } catch(error) {
+      await appendDebugError(this.store,{...context(),operation:'illustration',terminal:true},error).catch(()=>{});
       await this.store.mutate(storyId,undefined,current=>{
         if(current.illustrationJob?.id===job.id) Object.assign(current.illustrationJob,{status:job.controller.signal.aborted?'cancelled':'failed',error:job.controller.signal.aborted?undefined:String(error.message).slice(0,1000)});
       },{bump:false}).catch(()=>{});

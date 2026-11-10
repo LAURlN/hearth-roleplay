@@ -9,7 +9,7 @@
     setupLoading: false, settingsLoading: false, connection: null, drawerReturn: null,
     booted: false, nearBottom: true, confirmAction: null,
   };
-  const settingsFields = ['proxyBaseUrl', 'chatModel', 'imageModel', 'roleplayPrompt',
+  const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'roleplayPrompt',
     'illustratorPrompt', 'autoIllustrate', 'imageCooldown', 'imageQuality', 'imageSize',
     'maxResponders', 'contextMessages'];
   const numericSettings = new Set(['imageCooldown', 'maxResponders', 'contextMessages']);
@@ -966,6 +966,49 @@
   });
 
   $('open-story-menu').addEventListener('click', () => openDialog('story-menu-dialog'));
+  let debugSequence = 0;
+  let debugStoryId = null;
+  async function loadDebugLog() {
+    const id=debugStoryId, sequence=++debugSequence;
+    if(!id)return;
+    $('refresh-debug').disabled=true;
+    inlineError('debug-error',null);
+    try {
+      const response=await fetch(storyPath(id,'/debug'),{credentials:'same-origin',cache:'no-store',headers:{Accept:'text/plain'}});
+      if(!response.ok)throw new Error(`Could not load AI debug log (${response.status}).`);
+      const text=await response.text();
+      if(sequence!==debugSequence || id!==debugStoryId)return;
+      $('debug-text').value=text;
+      $('copy-debug').disabled=false; $('download-debug').disabled=false;
+    }catch(error){if(sequence===debugSequence)inlineError('debug-error',error);}
+    finally{if(sequence===debugSequence)$('refresh-debug').disabled=false;}
+  }
+  $('open-debug').addEventListener('click',()=>{
+    if(!state.story)return;
+    debugStoryId=state.story.id;
+    $('debug-text').value='';
+    $('copy-debug').disabled=true; $('download-debug').disabled=true;
+    closeDialog('story-menu-dialog'); openDialog('debug-dialog');
+    loadDebugLog();
+  });
+  $('refresh-debug').addEventListener('click',loadDebugLog);
+  $('copy-debug').addEventListener('click',async()=>{
+    try {
+      if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText($('debug-text').value);toast('AI debug log copied.');
+    }catch{
+      $('debug-text').focus();$('debug-text').select();
+      let copied=false;try{copied=document.execCommand('copy');}catch{/* Select for manual copying. */}
+      toast(copied?'AI debug log copied.':'Text selected. Use Copy from your browser’s selection menu.');
+    }
+  });
+  $('download-debug').addEventListener('click',()=>{
+    if(!debugStoryId)return;
+    const url=URL.createObjectURL(new Blob([$('debug-text').value],{type:'text/plain;charset=utf-8'}));
+    const link=node('a');link.href=url;link.download=`hearth-debug-${debugStoryId}.txt`;
+    document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
+    toast('AI debug log downloaded.');
+  });
   $('reuse-story').addEventListener('click', () => {
     const setup = state.story?.setup;
     closeDialog('story-menu-dialog');
