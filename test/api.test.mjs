@@ -1,3 +1,4 @@
+import {semanticReply} from './helpers/semantic-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -12,8 +13,9 @@ function fakeProvider() {
   const fake={calls:[],imageCalls:[],fail:false,hold:false,entered:null,release:null};
   fake.provider={models:async()=>[{id:'gpt-6.1-sol',name:'Sol'}],complete:async request=>{
     fake.calls.push(request);
-    if(fake.fail) throw new Error('Scripted provider failure');
     const system=request.messages[0].content;
+    if(fake.fail&&(!fake.failStage||system.includes(fake.failStage))) throw new Error('Scripted provider failure');
+    if(semanticReply(request)!==null)return semanticReply(request);
     if(system.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     if(system.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null,"placements":[]}';
     const raw=request.messages[1].content;
@@ -73,7 +75,7 @@ test('HTTP bootstrap, static assets, local origin guard, and settings validation
 
 test('complete story turn is durable and exposes no internal snapshots to the UI',async t=>{
   const f=await fixture(t),created=await f.request('/api/stories','POST',setup),story=created.body;
-  assert.equal(created.status,201);assert.ok(story.branch.messages.length>=2);assert.equal(story.world.location,'The inn');assert.equal(story.version,1);
+  assert.equal(created.status,201,JSON.stringify(story));assert.ok(story.branch.messages.length>=2);assert.equal(story.world.location,'The inn');assert.equal(story.version,1);
   assert.ok(story.branch.messages.some(m=>m.role==='character'&&m.text==='Welcome. Sit by the fire.'));
   assert.ok(story.branch.messages.every(message=>!Object.hasOwn(message,'snapshot')));
   const advanced=(await f.request(route(story)+'/turn','POST',{text:'I order tea.',expectedVersion:story.version})).body;
@@ -113,7 +115,7 @@ test('downloadable AI logs cover requests, failed revisions, and survive rollbac
   story=(await f.request(route(story)+'/turn','POST',{text:'A debugging question.',expectedVersion:story.version})).body;
   const originalBranch=story.activeBranchId;
   const target=story.branch.messages.find(m=>m.role==='player');
-  f.fake.fail=true;
+  f.fake.fail=true;f.fake.failStage='private input interpreter';
   assert.equal((await f.request(route(story)+'/branch','POST',{mode:'edit',messageId:target.id,text:'A failed edited question.',expectedVersion:story.version})).status,500);
   const response=await fetch(f.base+route(story)+'/debug');
   assert.equal(response.status,200);assert.match(response.headers.get('content-type'),/text\/plain/);assert.equal(response.headers.get('cache-control'),'no-store');

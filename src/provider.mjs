@@ -68,16 +68,18 @@ export function createProvider(settings, fetchImpl = fetch) {
     async models() {
       const data = await request('/models', {signal:AbortSignal.timeout(8000)}, 2 * 1024 * 1024);
       const list = data.data ?? data.models ?? [];
-      return list.map(item => typeof item === 'string' ? {id:item,name:item} : {id:item.id ?? item.slug,name:item.display_name ?? item.name ?? item.id ?? item.slug}).filter(item=>item.id);
+      return list.map(item => typeof item === 'string' ? {id:item,name:item} : item && typeof item === 'object' ? {...item,id:item.id ?? item.slug,name:item.display_name ?? item.name ?? item.id ?? item.slug} : null).filter(item=>typeof item?.id==='string'&&item.id);
     },
-    async complete({model=settings.chatModel,messages,signal}) {
+    async complete({model=settings.chatModel,messages,signal,reasoningEffort}) {
       // openai-oauth's chat adapter passes data: images through an SDK URL
       // downloader. Its native Responses route preserves inline image bytes.
       if(messages.some(message=>Array.isArray(message.content)&&message.content.some(part=>part?.type==='image_url'))) {
-        const result=await request('/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(visionRequest(model,messages)),signal},4*1024*1024);
+        const body=visionRequest(model,messages);
+        if(reasoningEffort)body.reasoning={effort:reasoningEffort};
+        const result=await request('/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal},4*1024*1024);
         return checkedResponse(result,visionText);
       }
-      const result = await request('/chat/completions', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model,messages,stream:false}),signal}, 4 * 1024 * 1024);
+      const result = await request('/chat/completions', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model,messages,stream:false,...(reasoningEffort?{reasoning_effort:reasoningEffort}:{})}),signal}, 4 * 1024 * 1024);
       return checkedResponse(result,()=>{
         const choice = result.choices?.[0];
         if (choice?.message?.refusal || choice?.finish_reason === 'content_filter') throw new ProviderError(`The model declined this request: ${choice.message.refusal ?? 'Content filter refusal.'}`, 422, 'MODEL_REFUSAL');

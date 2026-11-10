@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createProvider } from '../src/provider.mjs';
-import { DEFAULT_SETTINGS } from '../src/settings.mjs';
+import { DEFAULT_SETTINGS, normalizeSettings } from '../src/settings.mjs';
 
 test('subscription transport sends selected model and does not attach platform API credentials',async()=>{
   const calls=[];const provider=createProvider(DEFAULT_SETTINGS,async(url,options)=>{calls.push({url,options});return Response.json({choices:[{message:{content:'{"text":"Hello"}'},finish_reason:'stop'}]});});
@@ -71,4 +71,33 @@ test('visual history preserves assistant text, image details, and the caller can
   const provider=createProvider(DEFAULT_SETTINGS,async(url,options)=>{request={url,options};assert.ok(!options.signal.aborted);controller.abort();assert.ok(options.signal.aborted);return Response.json({status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'The same red scarf.'}]}]});});
   const result=await provider.complete({signal:controller.signal,messages:[{role:'system',content:'Illustrate carefully.'},{role:'assistant',content:'Earlier illustration notes.'},{role:'user',content:[{type:'image_url',image_url:{url:'data:image/jpeg;base64,eA==',detail:'low'}},{type:'text',text:'Keep this face.'}]}]});
   const body=JSON.parse(request.options.body);assert.equal(body.input[0].content[0].type,'output_text');assert.equal(body.input[1].content[0].detail,'low');assert.equal(result,'The same red scarf.');
+});
+
+test('reasoning effort uses each transport schema and provider default omits it',async()=>{
+  const calls=[];
+  const provider=createProvider(DEFAULT_SETTINGS,async(url,options)=>{
+    calls.push({url,body:JSON.parse(options.body)});
+    return Response.json(url.endsWith('/responses')?{output:[{type:'message',content:[{type:'output_text',text:'ok'}]}]}:{choices:[{message:{content:'ok'},finish_reason:'stop'}]});
+  });
+  await provider.complete({model:'selected',messages:[],reasoningEffort:'none'});
+  await provider.complete({model:'selected',messages:[],reasoningEffort:''});
+  await provider.complete({model:'selected',messages:[{role:'user',content:[{type:'image_url',image_url:{url:'data:image/png;base64,eA=='}}]}],reasoningEffort:'high'});
+  assert.equal(calls[0].body.reasoning_effort,'none');assert.equal(calls[0].body.reasoning,undefined);
+  assert.equal(calls[1].body.reasoning_effort,undefined);assert.equal(calls[1].body.reasoning,undefined);
+  assert.deepEqual(calls[2].body.reasoning,{effort:'high'});assert.equal(calls[2].body.reasoning_effort,undefined);
+});
+
+test('model discovery retains advertised reasoning and modality capabilities',async()=>{
+  const advertised={id:'model-a',display_name:'Model A',supported_reasoning_levels:[{effort:'low'},{effort:'high'}],capabilities:{vision:true},modalities:['text','image']};
+  const provider=createProvider(DEFAULT_SETTINGS,async()=>Response.json({data:[advertised,'model-b',null]}));
+  const models=await provider.models();
+  assert.deepEqual(models,[{...advertised,name:'Model A'},{id:'model-b',name:'model-b'}]);
+});
+
+test('role efforts default independently and validate without confusing none with unset',()=>{
+  const defaults=normalizeSettings();
+  for(const key of ['chatEffort','characterEffort','helperEffort','illustratorEffort'])assert.equal(defaults[key],'');
+  const chosen=normalizeSettings({chatEffort:'high',characterEffort:'none',helperEffort:'low',illustratorEffort:'medium'});
+  assert.equal(chosen.characterEffort,'none');assert.equal(chosen.helperEffort,'low');
+  for(const invalid of ['fast',null,2,{}])assert.throws(()=>normalizeSettings({helperEffort:invalid}),/helperEffort/);
 });

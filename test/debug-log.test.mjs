@@ -20,9 +20,9 @@ test('logs retain exact model prompts/replies and persist independently of disca
   const f=await fixture(t),reply='```json\n{"text":"", "privateState":"Choosing silence"}\n```';
   const provider=f.wrap({complete:async()=>reply});
   const messages=[{role:'system',content:'Private roleplay rules'},{role:'user',content:'Private character context\nincluding thoughts'}];
-  assert.equal(await provider.complete({model:'helper-choice',messages,headers:{Authorization:'DO-NOT-LOG'}}),reply);
+  assert.equal(await provider.complete({model:'helper-choice',reasoningEffort:'low',messages,headers:{Authorization:'DO-NOT-LOG'}}),reply);
   const records=await f.store.debugRecords('story');
-  assert.equal(records.length,2);assert.deepEqual(records[0].request,{model:'helper-choice',messages});
+  assert.equal(records.length,2);assert.deepEqual(records[0].request,{model:'helper-choice',reasoningEffort:'low',messages});
   assert.equal(records[1].response,reply);assert.equal(records[0].requestId,records[1].requestId);
   assert.equal(records[0].stage,'Ada is responding');assert.equal(records[1].branchId,'branch');
   const log=formatDebugLog(records,{storyId:'story',title:'Test'});

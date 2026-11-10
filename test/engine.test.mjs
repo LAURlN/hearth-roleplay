@@ -1,3 +1,4 @@
+import {semanticReply} from './helpers/semantic-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createInitialState, runTurn, applyAuthoredMessage, characterContext, parseJson } from '../src/engine.mjs';
@@ -19,6 +20,7 @@ function fake(...responses) {
   const complete = async request => {
     // These existing orchestration tests script dialogue, not visual parsing.
     // Dedicated visual-state tests exercise real patches and helper failures.
+    if(semanticReply(request)!==null)return semanticReply(request);
     if(request.messages[0].content.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     if(request.messages[0].content.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null,"placements":[]}';
     calls.push(request);
@@ -125,6 +127,7 @@ test('empty local recipient lists deliver player speech and a generated answer t
   ];
   const calls=[];
   const complete=async request=>{
+    if(semanticReply(request)!==null)return semanticReply(request);
     if(request.messages[0].content.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     if(request.messages[0].content.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null,"placements":[]}';
     calls.push(request);
@@ -343,22 +346,23 @@ test('an invitation may be declined; silent off-scene state has a coherent new c
   complete.done();
 });
 
-test('narrator voluntary movement and absent explicit local recipients are rejected atomically', async () => {
+test('narrator voluntary movement is rejected and a helper can decline delivery to an absent addressee', async () => {
   const state = world(); const ben = find(state, 'Ben');
   const invalid = plan([{ type: 'movement', characterId: ben.id, destination: 'cafe', mode: 'voluntary', reason: 'He feels like it.' }]);
   const movement = fake(invalid, invalid);
   await assert.rejects(turn(state, movement), /requires the character decision/);
-  const absent = fake(plan([], [ben.id]), actor('I am here.',{recipients:['player']}), actor('I am here.',{recipients:['player']}));
-  await assert.rejects(turn(state, absent), /local recipient is absent/);
+  const absent = fake(plan([], [ben.id]), actor('I am here.',{recipients:['player']}),{text:'A quiet moment passes.'});
+  const result=await turn(state,absent);
+  assert.ok(!texts(result.state.characters[0]).includes('I am here.'));
   assert.equal(ben.location, 'road');
   assert.equal(state.events.length, 0);
 });
 
-test('presence and remote connectivity are enforced independently of speaking selection', async () => {
+test('local perception is helper-resolved while remote connectivity is enforced independently', async () => {
   const state = world(); const ben = find(state, 'Ben');
   const absentRecipient = plan([{ type: 'observation', text: 'A whisper.', location: 'cafe', recipients: [ben.id] }]);
-  const local = fake(absentRecipient, absentRecipient);
-  await assert.rejects(turn(state, local), /local recipient is absent/);
+  const local = fake(absentRecipient);
+  const result=await turn(state,local);assert.ok(!texts(find(result.state,'Ben')).includes('whisper'));
   const online = fake(plan([], [ben.id]), actor('A message.', { channel: 'online', recipients: ['player'] }), actor('A message.', { channel: 'online', recipients: ['player'] }));
   await assert.rejects(turn(state, online), /no online access/);
 });
@@ -507,7 +511,8 @@ test('an independent helper restores evidenced background observations before th
       return actor('Yes, beside the window.');
     },
   ];
-  const complete=async request=>{if(request.messages[0].content.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
+  const complete=async request=>{if(semanticReply(request)!==null)return semanticReply(request);
+    if(request.messages[0].content.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     if(request.messages[0].content.includes('PLAYER PLACEMENT RESOLVER'))return '{"correction":null,"placements":[]}';models.push(request.model);const response=responses.shift();assert.ok(response);return JSON.stringify(typeof response==='function'?response(request):response);};
   const result=await turn(opening.state,complete,{input,messages:history,settings:{...settings,helperModel:'test-helper'},onStage:s=>stages.push(s)});
   assert.deepEqual(models,['test-helper','test-model','test-helper','test-model']);

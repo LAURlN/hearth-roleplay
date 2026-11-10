@@ -1,3 +1,4 @@
+import {semanticReply} from './helpers/semantic-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -14,6 +15,7 @@ test('each actor receives general, shared and only its own individual system rul
   const complete=async request=>{
     const system=request.messages[0].content,data=JSON.parse(request.messages[1].content);
     assert.ok(system.includes(settings.roleplayPrompt));
+    if(semanticReply(request)!==null)return semanticReply(request);
     if(system.includes('CHARACTER VISUAL STATE')){assert.ok(!system.includes(settings.characterPrompt));return '{"patches":[]}';}
     if(system.includes('omniscient narrator/planner')){assert.ok(!system.includes(settings.characterPrompt));return JSON.stringify({events:[],text:'The room is quiet.',speakers:state.characters.filter(c=>c.id!=='player').map(c=>c.id)});}
     if(system.includes('You play ONLY')){
@@ -34,6 +36,7 @@ test('creation curator receives general rules; model-invented prompt fields neve
   let curated=false,acted=false;
   const complete=async request=>{
     const system=request.messages[0].content;
+    if(semanticReply(request)!==null)return semanticReply(request);
     if(system.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     if(system.includes('omniscient narrator/planner'))return JSON.stringify({text:'',events:[{type:'introduction',character:newcomer,reason:'A new arrival.'}],speakers:[newcomer.id]});
     if(system.includes('CHARACTER CONTEXT CURATOR')){

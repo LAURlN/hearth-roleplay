@@ -181,6 +181,7 @@ export class StoryService {
     const validateWorld=world=>{
       if(!world||!Array.isArray(world.characters)||!world.characters.some(c=>c.id==='player')||!Array.isArray(world.events)||!Array.isArray(world.publications)||!Array.isArray(world.locations)||typeof world.location!=='string'||!Number.isFinite(world.time)||!world.exposureDecisions||!Array.isArray(world.pending)) throw failure('An imported story checkpoint is invalid.');
       const ids=new Set();
+      if(world.perceptionMode!==undefined&&world.perceptionMode!=='helper')throw failure('Invalid imported perception mode.');
       for(const c of world.characters) {
         if(typeof c.id!=='string'||ids.has(c.id)||typeof c.name!=='string'||typeof c.location!=='string'||!Array.isArray(c.knowledge)||!c.online||typeof c.online.access!=='boolean') throw failure('An imported character is invalid.');
         if(c.visual!==undefined){
@@ -196,6 +197,7 @@ export class StoryService {
         ids.add(c.id);
         if(c.systemPrompt!==undefined)text(c.systemPrompt,'imported character system prompt',60000,true);
       }
+      for(const c of world.characters)if(c.visibleCharacters!==undefined&&(!Array.isArray(c.visibleCharacters)||c.visibleCharacters.some(id=>typeof id!=='string'||id===c.id||!ids.has(id))))throw failure('Invalid imported visible characters.');
     };
     let count=0;
     for(const [key,branch] of Object.entries(story.branches)) {

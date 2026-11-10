@@ -6,11 +6,11 @@
     settings: null, stories: [], story: null, operation: null, selecting: false,
     selection: 0, pollToken: 0, pollTimer: null, pollController: null,
     message: null, revision: null, imageIndex: 0, transcriptKey: '',
-    setupLoading: false, settingsLoading: false, connection: null, drawerReturn: null,
+    setupLoading: false, settingsLoading: false, connection: null, drawerReturn: null, models: [], modelRequest: 0,
     booted: false, nearBottom: true, confirmAction: null,
     libraryArchived: false, libraryTarget: null, visualEditor: null, appearanceSaving: false, promptEditor:null, characterPromptSaving:false,
   };
-  const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'roleplayPrompt', 'characterPrompt',
+  const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'chatEffort', 'characterEffort', 'helperEffort', 'illustratorEffort', 'roleplayPrompt', 'characterPrompt',
     'illustratorPrompt', 'autoIllustrate', 'imageCooldown', 'imageQuality', 'imageSize',
     'maxResponders', 'contextMessages'];
   const numericSettings = new Set(['imageCooldown', 'maxResponders', 'contextMessages']);
@@ -986,6 +986,45 @@
     }
   });
 
+  function modelEfforts(model) {
+    const levels=model?.supported_reasoning_efforts??model?.supported_reasoning_levels??model?.reasoning_efforts??model?.capabilities?.reasoning_efforts??model?.reasoning?.efforts;
+    return Array.isArray(levels)?levels.map(level=>typeof level==='string'?level:level?.effort??level?.id).filter(level=>typeof level==='string'):null;
+  }
+  function populateEfforts() {
+    const chat=$('setting-chatModel').value;
+    for(const key of ['chatEffort','characterEffort','helperEffort','illustratorEffort']) {
+      const field=$(`setting-${key}`),selected=field.value||'';
+      const modelId=key==='helperEffort'?$('setting-helperModel').value||chat:chat;
+      const advertised=modelEfforts(state.models.find(model=>model.id===modelId));
+      const levels=advertised??['none','minimal','low','medium','high','xhigh','max','ultra'];
+      field.replaceChildren();
+      const defaults=node('option','','Provider default');defaults.value='';field.append(defaults);
+      for(const level of [...new Set(levels)]) {
+        const option=node('option','',level==='xhigh'?'Extra high':level.charAt(0).toUpperCase()+level.slice(1));option.value=level;field.append(option);
+      }
+      if(selected&&!levels.includes(selected)) {
+        const option=node('option','',`${selected} (saved; not advertised for this model)`);option.value=selected;field.append(option);
+      }
+      field.value=selected;
+    }
+  }
+  function populateModelChoices(models) {
+    for(const key of ['chatModel','helperModel','imageModel']) {
+      const field=$(`setting-${key}`),selected=field.value??state.settings?.[key]??'';
+      field.replaceChildren();
+      if(key==='helperModel'){const option=node('option','','Use narrator & character model');option.value='';field.append(option);}
+      for(const model of models) {
+        const option=node('option','',model.name&&model.name!==model.id?`${model.name} · ${model.id}`:model.id);option.value=model.id;field.append(option);
+      }
+      if(selected&&!models.some(model=>model.id===selected)) {
+        const option=node('option','',`${selected} (saved; unavailable in this model list)`);option.value=selected;field.append(option);
+      }
+      if(!selected&&key!=='helperModel'){const option=node('option','','No model selected');option.value='';field.append(option);}
+      field.value=selected;
+    }
+    populateEfforts();
+  }
+  for(const key of ['chatModel','helperModel'])$(`setting-${key}`).addEventListener('change',populateEfforts);
   function populateSettings() {
     if (!state.settings) return;
     for (const key of settingsFields) {
@@ -1000,6 +1039,7 @@
       }
     }
     $('setting-requestTimeout').value = Math.round((state.settings.requestTimeoutMs || 180000) / 1000);
+    populateModelChoices(state.models);
   }
   $('open-settings').addEventListener('click', () => {
     setDrawer(false); populateSettings(); inlineError('settings-error', null);
@@ -1007,6 +1047,7 @@
     $('check-models').disabled = !state.settings;
     if (!state.settings) inlineError('settings-error', 'Settings are unavailable until the local server connects. Close this window and retry the library.');
     openDialog('settings-dialog');
+    if(state.settings)checkModels();
   });
   $('settings-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -1023,7 +1064,9 @@
     $('check-models').disabled = true;
     inlineError('settings-error', null);
     try {
+      const previousProxy=state.settings.proxyBaseUrl;
       state.settings = await api('/api/settings', { method: 'PUT', body: settings });
+      if(previousProxy!==state.settings.proxyBaseUrl)state.models=[];
       populateSettings(); toast('Settings saved. New generations use these prompts.');
       await checkModels();
     } catch (error) { inlineError('settings-error', error); }
@@ -1034,27 +1077,26 @@
     }
   });
   async function checkModels() {
+    const request=++state.modelRequest,proxyBaseUrl=state.settings?.proxyBaseUrl;
     $('check-models').disabled = true;
     $('model-result').textContent = 'Checking the saved proxy connection…';
     try {
       const result = await api('/api/models');
+      if(request!==state.modelRequest||proxyBaseUrl!==state.settings?.proxyBaseUrl)return;
       state.connection = Boolean(result.connected);
       $('connection').dataset.connected = String(state.connection);
       $('connection-text').textContent = state.connection ? 'Subscription proxy connected' : 'Proxy disconnected';
       $('model-result').textContent = result.connected
         ? `Connected · ${(result.models || []).length} models available. Uses the saved connection settings.`
         : `${result.error || 'Proxy unavailable.'} Start the local proxy, sign in with your ChatGPT account, and check the saved base URL.`;
-      $('model-options').replaceChildren();
-      for (const model of result.models || []) {
-        const option = node('option'); option.value = model.id; option.label = model.name || model.id;
-        $('model-options').append(option);
-      }
+      if(result.connected){state.models=(result.models||[]).filter(model=>typeof model.id==='string');populateModelChoices(state.models);}
     } catch (error) {
+      if(request!==state.modelRequest||proxyBaseUrl!==state.settings?.proxyBaseUrl)return;
       state.connection = false;
       $('connection').dataset.connected = 'false';
       $('connection-text').textContent = 'Connection unavailable';
       $('model-result').textContent = error.message;
-    } finally { $('check-models').disabled = state.settingsLoading; }
+    } finally { if(request===state.modelRequest)$('check-models').disabled = state.settingsLoading; }
   }
   $('check-models').addEventListener('click', () => {
     if (state.settings && $('setting-proxyBaseUrl').value !== state.settings.proxyBaseUrl) {

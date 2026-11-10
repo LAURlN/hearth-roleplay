@@ -36,7 +36,7 @@ export function loggedProvider(provider,{store,settings,getContext}) {
   }
   return {
     ...provider,
-    complete:request=>recorded('text',{model:request.model??settings.chatModel,messages:request.messages},()=>provider.complete(request)),
+    complete:request=>recorded('text',{model:request.model??settings.chatModel,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{}),messages:request.messages},()=>provider.complete(request)),
     image:request=>recorded('image',{model:settings.imageModel,quality:settings.imageQuality,size:settings.imageSize,prompt:request.prompt,referenceImages:(request.references??[]).map(reference=>imageInfo(reference.bytes,reference.type))},()=>provider.image(request)),
   };
 }

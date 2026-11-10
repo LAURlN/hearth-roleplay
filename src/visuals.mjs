@@ -21,11 +21,12 @@ export function validateVisualFacts(facts) {
 
 // Only visible descriptions cross into an observer's context. Actual facts and
 // their private source excerpts remain in the authoritative world state.
-function perceive(state,subject,observers,time=state.time,sourceId,location=subject.location) {
+function perceive(state,subject,observers,time=state.time,sourceId,location=subject.location,authorized=false,selected,historicalSight) {
+  if(state.perceptionMode==='helper'&&!authorized)return;
   if(!subject.visual?.initialized)return;
-  const current=visible(subject);
+  const current=selected??visible(subject);
   for(const observer of observers) {
-    if(observer.id===subject.id||observer.visual?.canSee===false)continue;
+    if(observer.id===subject.id||(historicalSight??observer.visual?.canSee)===false)continue;
     observer.seenAppearance??={};
     const previous=seen(observer,subject.id);
     if(previous&&equal(previous.current,current)){
@@ -49,7 +50,18 @@ export function refreshVisualWitnesses(state) {
 
 export function visualContext(state,observerId) {
   const observer=who(state,observerId);
-  return state.characters.filter(c=>c.id!==observerId&&c.location===observer.location).map(c=>({id:c.id,name:c.name,appearance:observer.visual?.canSee===false?'':seen(observer,c.id)?.current?.map(f=>f.text).join('; ')??'',rememberedAppearance:copy(seen(observer,c.id)?.facts??[])}));
+  return state.characters.filter(c=>c.id!==observerId&&(state.perceptionMode==='helper'?observer.visibleCharacters?.includes(c.id):c.location===observer.location)).map(c=>({id:c.id,name:c.name,appearance:observer.visual?.canSee===false?'':seen(observer,c.id)?.current?.map(f=>f.text).join('; ')??'',rememberedAppearance:copy(seen(observer,c.id)?.facts??[])}));
+}
+
+export function applyPerceivedViews(state,world,views,sourceId) {
+  for(const view of views){
+    const observer=who(state,view.observerId);
+    observer.visibleCharacters=view.subjects.map(s=>s.characterId);
+    for(const subject of view.subjects){
+      const target=who(world,subject.characterId);
+      perceive(state,target,[observer],world.time,sourceId,target.location,true,visible(target).filter(f=>subject.keys.includes(f.key)),who(world,view.observerId).visual?.canSee!==false);
+    }
+  }
 }
 
 export function visualEventSources(events) {

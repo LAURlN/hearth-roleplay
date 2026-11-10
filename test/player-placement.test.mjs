@@ -1,3 +1,4 @@
+import {semanticReply} from './helpers/semantic-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createInitialState,runTurn} from '../src/engine.mjs';
@@ -11,6 +12,7 @@ function provider({interpret,placement,plan,actor,movement}={}){
   const complete=async request=>{
     calls.push(request);
     const system=request.messages[0].content,data=JSON.parse(request.messages[1].content);
+    if(semanticReply(request)!==null)return semanticReply(request);
     if(system.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     if(system.includes('PLAYER PLACEMENT RESOLVER')){assert.equal(request.model,'helper-model');return JSON.stringify(placement?placement(data):{correction:null,placements:[]});}
     if(system.includes('private input interpreter'))return JSON.stringify(interpret?interpret(data):{segments:[{kind:'action',text:data.input}],allowMajorTimeSkip:false});
@@ -44,7 +46,7 @@ test('an authored object interaction resolves implicit placement before dialogue
   assert.equal(state.location,'atrium');
 });
 
-test('addressed speech validates presence after legacy repair and still rejects an actually absent recipient',async()=>{
+test('addressed speech resolves after legacy repair and a perception decision can withhold it from an absent recipient',async()=>{
   const state=world(),ada=person(state,'Ada'),input='"Good morning."';
   const action='I settle onto the window bench.';
   const history=[{id:'old-seat',role:'player',text:action,segments:[{kind:'action',text:action}],eventCount:0}];
@@ -53,7 +55,7 @@ test('addressed speech validates presence after legacy repair and still rejects 
   const result=await run(state,p,input,history);
   assert.match(known(person(result.state,'Ada')),/Good morning/);
   assert.deepEqual(result.messages[0].segments[0].recipients,[ada.id]);
-  await assert.rejects(run(state,provider({interpret}),input),/local recipient is absent/);
+  const absent=await run(state,provider({interpret}),input);assert.ok(!known(person(absent.state,'Ada')).includes('Good morning'));
   assert.equal(state.location,'atrium');
 });
 

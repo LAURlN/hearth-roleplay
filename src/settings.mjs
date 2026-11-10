@@ -18,7 +18,7 @@ Return ONLY JSON with {"generate":true|false,"reason":"short explanation","capti
 
 export const CHARACTER_PROMPT = `Portray the supplied person as an independent character with a consistent voice, personality and motives. Respond naturally to what they perceive and remember. Let them disagree, misunderstand, hesitate or stay silent when appropriate. Distinguish their beliefs from world truth. Character-specific instructions refine portrayal; they do not grant access to other people's private thoughts or unobserved events. Keep observable speech/actions separate from private internal state and preserve the player's agency.`;
 
-export const DEFAULT_SETTINGS = Object.freeze({ proxyBaseUrl:'http://127.0.0.1:10531/v1', chatModel:'gpt-6.1-sol', helperModel:'', imageModel:'gpt-image-2', roleplayPrompt:ROLEPLAY_PROMPT, characterPrompt:CHARACTER_PROMPT, illustratorPrompt:ILLUSTRATOR_PROMPT, autoIllustrate:true, imageCooldown:3, imageQuality:'medium', imageSize:'1024x1024', maxResponders:3, contextMessages:24, requestTimeoutMs:180000 });
+export const DEFAULT_SETTINGS = Object.freeze({ proxyBaseUrl:'http://127.0.0.1:10531/v1', chatModel:'gpt-6.1-sol', helperModel:'', imageModel:'gpt-image-2', chatEffort:'', characterEffort:'', helperEffort:'', illustratorEffort:'', roleplayPrompt:ROLEPLAY_PROMPT, characterPrompt:CHARACTER_PROMPT, illustratorPrompt:ILLUSTRATOR_PROMPT, autoIllustrate:true, imageCooldown:3, imageQuality:'medium', imageSize:'1024x1024', maxResponders:3, contextMessages:24, requestTimeoutMs:180000 });
 
 export function validateProxyUrl(value) {
   let url;
@@ -31,6 +31,10 @@ export function normalizeSettings(input = {}, base = DEFAULT_SETTINGS) {
   const settings = {...base};
   for (const key of Object.keys(DEFAULT_SETTINGS)) if (input[key] !== undefined) settings[key] = input[key];
   settings.proxyBaseUrl = validateProxyUrl(settings.proxyBaseUrl);
+  for(const key of ['chatEffort','characterEffort','helperEffort','illustratorEffort']) {
+    if(settings[key]===undefined)settings[key]='';
+    if(!['','none','minimal','low','medium','high','xhigh','max','ultra'].includes(settings[key]))throw new Error(`Invalid ${key}.`);
+  }
   if(typeof settings.helperModel!=='string'||settings.helperModel.length>150)throw new Error('Invalid helperModel.');
   settings.helperModel=settings.helperModel.trim();
   if(typeof settings.characterPrompt!=='string'||settings.characterPrompt.length>60000)throw new Error('Invalid characterPrompt.');

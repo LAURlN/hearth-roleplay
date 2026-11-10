@@ -1,5 +1,6 @@
-import { randomUUID, createHash } from 'node:crypto';
-import {syncVisuals,refreshVisualWitnesses,visualContext,visualEventSources,correctVisuals} from './visuals.mjs';
+import { randomUUID } from 'node:crypto';
+import {syncVisuals,refreshVisualWitnesses,visualContext,visualEventSources,correctVisuals,applyPerceivedViews} from './visuals.mjs';
+import {createSemantics} from './semantics.mjs';
 import {CHARACTER_PROMPT} from './settings.mjs';
 
 // All mutable values crossing this module's boundary are copied. The caller owns
@@ -9,6 +10,7 @@ const id = () => randomUUID();
 const SHORT_TRANSITION = 30;
 const CHANNELS = ['local', 'phone', 'online'];
 const PRIVATE = new Set(['thought', 'ooc', 'ambiguous']);
+const runtimes=new WeakMap();
 const EVENT_TYPES = new Set(['establish', 'background', 'observation', 'movement', 'time', 'publication', 'invitation', 'introduction', 'activity']);
 
 function check(condition, message) {
@@ -47,13 +49,14 @@ async function generate(env, stage, instruction, payload, validate, { helper = f
   env.onStage?.(stage);
   const actingRules=actor?`Shared character system prompt:\n${env.settings.characterPrompt??CHARACTER_PROMPT}\n\n${actor.systemPrompt?.trim()?`Character-specific system prompt:\n${actor.systemPrompt}\n\n`:''}`:'';
   const requests = [
-    { role: 'system', content: `${env.settings.roleplayPrompt || 'Tell a coherent roleplay story with independent character agency.'}\n\n${actingRules}${instruction}\nRecipient convention: ordinary observable LOCAL speech/actions omit recipients or use []; both mean all people at that location. A nonempty list intentionally restricts who can perceive it (for example, a whisper). Remote phone/online messages require explicit nonempty recipients. Thoughts/OOC remain private regardless of recipient fields. Put actual spoken replies in text; an empty text field means deliberately saying/doing nothing observable.\nReturn ONLY a JSON object. No Markdown, commentary, or response_format dependency. If you must refuse, return {"refusal":"reason"}.` },
+    { role: 'system', content: `${env.settings.roleplayPrompt || 'Tell a coherent roleplay story with independent character agency.'}\n\n${actingRules}${instruction}\nRecipient convention: ordinary observable LOCAL speech/actions omit recipients or use []; both ask the perception helper to evaluate plausible witnesses, including nearby locations. A nonempty list intentionally restricts who can perceive it (for example, a whisper). Remote phone/online messages require explicit nonempty recipients. Thoughts/OOC remain private regardless of recipient fields. Put actual spoken replies in text; an empty text field means deliberately saying/doing nothing observable.\nReturn ONLY a JSON object. No Markdown, commentary, or response_format dependency. If you must refuse, return {"refusal":"reason"}.` },
     { role: 'user', content: JSON.stringify(payload) },
   ];
   for (let attempt = 0; attempt < 2; attempt++) {
     aborted(env.signal);
     // Transport failures and refusals are never retried or routed elsewhere.
-    const raw = await env.complete({ model: (helper && env.settings.helperModel) || env.settings.chatModel || 'gpt-6.1-sol', messages: clone(requests), signal: env.signal, json: true });
+    const reasoningEffort=helper?env.settings.helperEffort:actor?env.settings.characterEffort:env.settings.chatEffort;
+    const raw = await env.complete({ model: (helper && env.settings.helperModel) || env.settings.chatModel || 'gpt-6.1-sol', ...(reasoningEffort?{reasoningEffort}:{}), messages: clone(requests), signal: env.signal, json: true });
     aborted(env.signal);
     if (typeof raw === 'string' && /^(?:I'm sorry|I am sorry|I cannot (?:help|assist|comply)|I can't (?:help|assist|comply))/i.test(raw.trim())) throw new RefusalError(raw);
     try {
@@ -109,11 +112,11 @@ function message(state, role, text, characterId, extra = {}) {
   const who = characterId ? character(state, characterId) : null;
   return { id: id(), role, ...(characterId ? { characterId } : {}), speaker: role === 'narrator' ? 'Narrator' : who?.name || 'You', text, createdAt: new Date().toISOString(), storyTime:state.time, eventCount:state.events.length, ...clone(extra), snapshot: clone(state) };
 }
-function remember(state, recipient, text, source, eventId) {
+function remember(state, recipient, text, source, eventId, time=state.time) {
   // Sources are checked before delivery. A legitimate later utterance can
   // disclose something the player previously only thought, to its actual audience.
   const who = character(state, recipient);
-  if (!who.knowledge.some(k => k.eventId === eventId && k.text === text)) who.knowledge.push({ id: id(), text, source, time: state.time, ...(eventId ? { eventId } : {}) });
+  if (!who.knowledge.some(k => k.eventId === eventId && k.text === text)) who.knowledge.push({ id: id(), text, source, time, ...(eventId ? { eventId } : {}) });
 }
 function assertObservable(state, text, { authored = false, characterId } = {}) {
   if (typeof text !== 'string') return;
@@ -127,7 +130,7 @@ function assertObservable(state, text, { authored = false, characterId } = {}) {
   }
 }
 function log(state, event) {
-  const entry = { ...clone(event), id: id(), time: state.time };
+  const entry = { ...clone(event), id: id(), time: event.time??state.time };
   state.events.push(entry);
   return entry;
 }
@@ -144,10 +147,8 @@ function validateRecipients(state, event, { localPresence = true } = {}) {
     if (event.characterId) check(character(state, event.characterId).online.access, 'Sender has no online access.');
     for (const recipient of event.recipients) check(character(state, recipient).online.access, 'Recipient has no online access.');
   }
-  if (channel === 'local' && localPresence) {
-    const location = event.location || (event.characterId ? character(state, event.characterId).location : state.location);
-    for (const recipient of event.recipients || []) check(character(state, recipient).location === location, 'A local recipient is absent.');
-  }
+  // Local audibility/visibility is resolved by the perception helper, including
+  // explicitly addressed people. Identity and remote-access checks stay in code.
 }
 function observe(state, proposal, source = 'perception', authorization = {}) {
   validateRecipients(state, proposal);
@@ -155,6 +156,12 @@ function observe(state, proposal, source = 'perception', authorization = {}) {
   assertObservable(state, proposal.text, sourceAuthority);
   assertObservable(state, source, sourceAuthority);
   const location = proposal.location || (proposal.characterId ? character(state, proposal.characterId).location : state.location);
+  const semantic=runtimes.get(state)?.semantics;
+  if(semantic&&(proposal.channel||'local')==='local'){
+    const entry=log(state,{...proposal,type:'observation',location,intendedRecipients:proposal.recipients||[],recipients:proposal.characterId?[proposal.characterId]:[],localBroadcast:!proposal.recipients?.length,...(authorization.authored?{authored:true}:{})});
+    if(proposal.characterId)remember(state,proposal.characterId,proposal.text,source,entry.id);
+    semantic.queue(entry);return entry;
+  }
   // Models commonly use [] for an optional local audience. Treat it the same
   // as omission; an explicit nonempty list still preserves private delivery.
   const recipients = proposal.recipients?.length ? proposal.recipients : state.characters.filter(c => c.location === location).map(c => c.id);
@@ -179,36 +186,7 @@ function move(state, characterId, destination, reason, text, authorization = {})
   }
 }
 
-function isAudience(pub, who) {
-  const audience = pub.audience;
-  if (audience.type === 'regional' || audience.type === 'local') return audience.locations.includes(who.location);
-  return who.online.access && (!audience.characterIds?.length || audience.characterIds.includes(who.id));
-}
-function exposure(state) {
-  for (const pub of state.publications) {
-    if (pub.time > state.time || (pub.expiresAt !== undefined && state.time > pub.expiresAt)) continue;
-    for (const who of state.characters) {
-      if (who.knowledge.some(k => k.publicationId === pub.id) || !isAudience(pub, who)) continue;
-      // One decision per actual reading opportunity (hour), including negative
-      // outcomes. A later hour or a newly established activity is a new opportunity.
-      const key = `${pub.id}:${who.id}:${Math.floor(state.time / 60)}:${who.exposureEpoch || 0}`;
-      let result = state.exposureDecisions[key];
-      if (result === undefined) {
-        const connected = who.id === pub.authorId || who.online.connections.includes(pub.authorId) || who.online.connections.includes(state.characters.find(c => c.id === pub.authorId)?.name);
-        const relevant = (pub.audience.interests || []).some(interest => who.online.interests.includes(interest));
-        const probability = pub.audience.type !== 'online' || connected ? 1 : relevant ? 0.75 : 0.15;
-        const sample = createHash('sha256').update(key).digest().readUInt32BE(0) / 0x100000000;
-        result = sample < probability;
-        state.exposureDecisions[key] = result;
-      }
-      if (result) {
-        const event = log(state, { type: 'exposure', characterId: who.id, publicationId: pub.id, source: pub.source, text: pub.text });
-        remember(state, who.id, pub.text, pub.source, event.id);
-        who.knowledge.at(-1).publicationId = pub.id;
-      }
-    }
-  }
-}
+function exposure(state) { runtimes.get(state)?.semantics.exposures(); }
 
 function validateAudience(state, audience) {
   check(object(audience) && ['online', 'regional', 'local'].includes(audience.type), 'Invalid publication audience.');
@@ -228,7 +206,7 @@ function validateEvent(state, event, { authoredCharacterId } = {}) {
       for (const who of state.characters) if (who.privateState?.length > 3) check(!event.text.includes(who.privateState), 'Shared background cannot contain a character private state.');
       break;
     case 'establish':
-      check(state.time === 0 && state.events.every(e=>['visual_change','appearance_observation','visual_access','visual_correction','character_prompt'].includes(e.type)) && state.location === 'Opening location', 'The opening setting is already established.');
+      check(state.time === 0 && state.events.every(e=>['visual_change','appearance_observation','visual_access','visual_correction','character_prompt','perception_decision'].includes(e.type)) && state.location === 'Opening location', 'The opening setting is already established.');
       string(event.location, 'opening location');
       if (event.label !== undefined) { string(event.label, 'opening time label'); assertObservable(state, event.label); }
       break;
@@ -288,7 +266,7 @@ function clock(state, target, env) {
   state.pending.sort((a, b) => a.at - b.at);
   while (state.time < target || (state.pending.length && state.pending[0].at <= target)) {
     if (state.pending.length) check(state.pending[0].at >= state.time, 'Pending event precedes the current clock.');
-    const candidates = state.publications.some(pub => pub.time <= state.time && (pub.expiresAt === undefined || pub.expiresAt >= state.time) && state.characters.some(who => isAudience(pub, who) && !who.knowledge.some(k => k.publicationId === pub.id)));
+    const candidates = state.publications.some(pub => pub.time <= state.time && (pub.expiresAt === undefined || pub.expiresAt >= state.time) && state.characters.some(who => !who.knowledge.some(k => k.publicationId === pub.id)));
     const nextHour = candidates ? (Math.floor(state.time / 60) + 1) * 60 : Infinity;
     const nextPending = state.pending[0]?.at ?? Infinity;
     state.time = Math.min(target, nextHour, nextPending);
@@ -351,7 +329,7 @@ function applyEvent(state, event, env) {
       // Only genuinely accessible publications can support initial story knowledge.
       for (const known of event.knowledge || []) {
         const pub = state.publications.find(p => p.id === known.publicationId);
-        check(pub.time <= state.time && (pub.expiresAt === undefined || pub.expiresAt >= state.time) && isAudience(pub, newcomer), 'Newcomer cannot access that source.');
+        check(pub.time <= state.time && (pub.expiresAt === undefined || pub.expiresAt >= state.time), 'Newcomer cannot access that source.');
       }
       // Proposed familiarity is not an exposure bypass. Resolve sources by the
       // same persisted audience/exposure rules used for the existing cast.
@@ -521,6 +499,7 @@ correction is only for a stale location record contradicted by a completed prior
     log(state,{type:'placement_correction',characterId:'player',from,destination:correction.destination,sourceId:correction.sourceId,excerpt:correction.excerpt});
     // No invented departure/arrival, nor retroactive delivery of old dialogue.
     refreshVisualWitnesses(state);
+    env.semantics.survey();await env.semantics.flush();
   }
   if(latest)state.playerPlacementCheckedAt=latest.messageId;
   if(revised){
@@ -540,6 +519,7 @@ async function applyPlayer(state, input, interpretation, env) {
     segment.placementResolved=true;
     const observed=observe(state, { text: segment.text, intentKind:segment.kind, characterId: 'player', location: character(state, 'player').location, channel: segment.channel || 'local', ...(segment.recipients ? { recipients: segment.recipients } : {}) }, `player ${segment.kind}`, { authored: true });
     await syncVisuals(state,env,{sources:visualEventSources([observed])});
+    await env.semantics.flush();
   }
   state.playerIntent = { allowMajorTimeSkip: interpretation.allowMajorTimeSkip, ...(interpretation.allowMajorTimeSkip ? { evidence: interpretation.timeSkipEvidence } : {}) };
 }
@@ -582,23 +562,50 @@ For a real newcomer use continuity:null and memories:[]; they did not hear earli
   return { ...event, character: {...result.character,systemPrompt:''}, knowledge: result.knowledge || [], continuity:result.continuity || null, curatedMemories, reconciled: true };
 }
 
+// Actual time advancement awaits each instantaneous pending event before moving
+// to the next boundary. The synchronous clock above is only trial validation.
+async function advanceClock(env,state,target,output,display){
+  check(Number.isFinite(target)&&target>=state.time,'Story time cannot go backwards.');
+  check(env.allowMajorTimeSkip||target-env.startTime<=SHORT_TRANSITION,'A major time skip requires explicit player intent.');
+  state.pending.sort((a,b)=>a.at-b.at);
+  while(state.time<target||(state.pending.length&&state.pending[0].at<=target)){
+    if(state.pending.length)check(state.pending[0].at>=state.time,'Pending event precedes the current clock.');
+    const candidates=state.publications.some(pub=>pub.time<=state.time&&(pub.expiresAt===undefined||pub.expiresAt>=state.time)&&state.characters.some(who=>!who.knowledge.some(k=>k.publicationId===pub.id)));
+    const nextHour=candidates?(Math.floor(state.time/60)+1)*60:Infinity;
+    state.time=Math.min(target,nextHour,state.pending[0]?.at??Infinity);
+    while(state.pending.length&&state.pending[0].at<=state.time){
+      const event=state.pending.shift();check(event.type!=='time','Pending events must be instantaneous; use their absolute at time.');
+      await enactPlan(env,state,{events:[event]},output,{display});
+    }
+    exposure(state);await env.semantics.flush();
+  }
+  state.time=target;exposure(state);await env.semantics.flush();
+}
+
 async function enactPlan(env, state, plan, output, { display = true } = {}) {
   for (let event of plan.events) {
     aborted(env.signal);
+    if (event.at !== undefined && event.at > state.time) await advanceClock(env,state,event.at,output,display);
     const eventStart=state.events.length;
-    if (event.at !== undefined && event.at > state.time) clock(state, event.at, env);
     if (event.type === 'introduction') event = await reconcileIntroduction(env, state, event);
+    if(event.type==='time'){
+      await advanceClock(env,state,state.time+event.minutes,output,display);
+      if(event.label)state.timeLabel=event.label;
+      log(state,{type:'time',minutes:event.minutes,label:state.timeLabel});
+      continue;
+    }
     applyEvent(state, event, env);
     await syncVisuals(state,env,{sources:visualEventSources(state.events.slice(eventStart))});
+    await env.semantics.flush();
     // Each visible event is its own boundary; a later arrival never changes an
     // earlier message's snapshot. Editorial narration itself teaches nobody.
-    const observation=event.type==='observation'?state.events.slice(eventStart).find(e=>e.type==='observation' && e.text===event.text):null;
-    const visibleHere = observation ? observation.recipients.includes('player') : event.type === 'introduction' ? character(state, event.character.id).location === state.location : event.type === 'movement' ? character(state, event.characterId).location === state.location || state.events.some(e => e.type === 'movement' && e.characterId === event.characterId && e.time === state.time && e.from === state.location) : (event.location || state.location) === state.location;
-    if (display && event.text && visibleHere && !['background', 'publication', 'invitation', 'activity'].includes(event.type)) output.push(message(state, 'narrator', event.text,undefined,observation?{sourceEventId:observation.id}:{}));
+    const perceived=state.events.slice(eventStart).filter(e=>e.type==='observation').flatMap(e=>(e.perceptions??((e.channel||'local')!=='local'&&e.recipients.includes('player')?[{characterId:'player',text:e.text}]:[])).filter(p=>p.characterId==='player').map(p=>({event:e,delivery:p})));
+    if(display&&!['background','publication','invitation','activity'].includes(event.type))for(const {event:source,delivery} of perceived)output.push(message(state,'narrator',delivery.text,undefined,{sourceEventId:source.id}));
   }
   if (plan.text?.trim()) {
     const visualText=plan.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,'').trim();
     await syncVisuals(state,env,{sources:visualText?[{id:`narration:${id()}`,kind:'narration',text:visualText,time:state.time}]:[]});
+    env.semantics.survey();await env.semantics.flush();
     if(display)output.push(message(state, 'narrator', plan.text));
   }
 }
@@ -616,28 +623,38 @@ function validateActor(state, who, result) {
   const channel = result.channel || 'local';
   if (result.text.trim()) {
     if (!(result.movement?.when === 'before' && channel === 'local')) validateRecipients(state, { ...result, characterId: who.id, location: who.location });
-    if (channel !== 'local') check(result.recipients?.includes('player'), 'Displayed remote speech must reach the player.');
     assertObservable(state, result.text, { characterId: who.id });
   }
 }
 async function resolveMovement(env, state, who, intent, output) {
-  const result = await generate(env, `Resolving ${who.name}'s movement`, `You are the narrator resolving feasibility of a character's OWN voluntary movement intent. You may approve or block its physical feasibility and describe external consequences. Do not change their chosen destination, consent, intentions or dialogue. Return {"allowed":boolean,"text":"observable arrival/departure or obstruction, no private reasoning","reason":"physical resolution"}. No time skip or extra actions.`, { world: state, intent: { characterId: who.id, ...intent } }, result => {
+  const result = await generate(env, `Resolving ${who.name}'s movement`, `You are an independent movement helper resolving feasibility of a character's OWN voluntary movement intent. You may approve or block its physical feasibility and describe external consequences. Do not change their chosen destination, consent, intentions or dialogue. Return {"allowed":boolean,"text":"observable arrival/departure or obstruction, no private reasoning","reason":"physical resolution"}. No time skip or extra actions.`, { world: state, intent: { characterId: who.id, ...intent } }, result => {
     check(typeof result.allowed === 'boolean', 'Missing movement resolution.');
     string(result.text, 'movement narration', true); string(result.reason, 'movement resolution reason');
-  });
-  const oldLocation = who.location;
+  },{helper:true});
   const eventStart=state.events.length;
   if (result.allowed) move(state, who.id, intent.destination, result.reason, result.text);
   else if (result.text) observe(state, { text: result.text, location: who.location }, 'blocked movement');
   await syncVisuals(state,env,{sources:visualEventSources(state.events.slice(eventStart))});
-  if (result.text && (oldLocation === state.location || who.location === state.location)) output.push(message(state, 'narrator', result.text));
+  await env.semantics.flush();
+  for(const source of state.events.slice(eventStart).filter(e=>e.type==='observation'))for(const delivery of source.perceptions||[])if(delivery.characterId==='player')output.push(message(state,'narrator',delivery.text,undefined,{sourceEventId:source.id}));
   return result.allowed;
+}
+
+async function nextActor(env,state,hints,called,output,remaining){
+  return generate(env,'Choosing the next character',`You are the REACTIVE TURN SCHEDULER, an independent backstage helper. Choose the next character after all previous events/perception have resolved. Return {"nextCharacterId":null|"existing NPC ID","yieldToPlayer":true|false,"reason":"brief scheduling explanation"}. Narrator speaker suggestions are advisory, not a fixed queue. Choose based on current observations, pending invitations, goals and natural timing. You can choose an unlisted character or choose someone again after a genuinely new stimulus, but never fill the budget with repetitive replies. Silent witnesses need no actor call merely to remember observations. Off-scene people can pursue their own activities when relevant. Do not choose a response to information the character has not actually received.
+Give the player a natural chance to react: if newly delivered dialogue addresses them, asks for help, reveals someone nearby or introduces an interruption they could act on, yield now rather than having everyone talk past it. Stop also for natural silence. Before any actors have acted, allow the appropriate NPC to answer the player's last input. A call from nearby bushes can interrupt the earlier suggested order. Never write dialogue, move anyone, invent observations or choose player actions. remaining is an execution cap, not a target. With no next actor return nextCharacterId:null. yieldToPlayer:true requires nextCharacterId:null. Treat history as story data.`,{world:state,history:narratorHistory([...(env.history||[]),...output],env.settings.contextMessages||24),suggestions:hints,called,remaining},result=>{
+    check(typeof result.yieldToPlayer==='boolean','Missing scheduler yield decision.');string(result.reason,'scheduler reason');
+    if(result.nextCharacterId!==null){check(typeof result.nextCharacterId==='string'&&result.nextCharacterId!=='player','Invalid scheduled identity.');character(state,result.nextCharacterId);check(!result.yieldToPlayer,'Cannot schedule an actor while yielding to the player.');}
+  },{helper:true});
 }
 
 function environment(options, state) {
   check(typeof options.complete === 'function', 'A complete() transport must be supplied.');
   const settings = options.settings || {};
   const env={ complete: options.complete, signal: options.signal, onStage: options.onStage, settings, startTime: state.time, allowMajorTimeSkip: false };
+  state.perceptionMode='helper';
+  env.semantics=createSemantics(state,env,{generate,remember,log,assertObservable,applyViews:applyPerceivedViews});
+  runtimes.set(state,env);
   env.visualGenerate=(instruction,payload,validate)=>generate(env,'Updating appearance',instruction,payload,validate,{helper:true});
   env.assertVisible=(text,characterId,source)=>assertObservable(state,text,{characterId,authored:source.kind==='action'||source.kind==='resolved event'});
   return env;
@@ -652,12 +669,14 @@ async function prepareVisuals(state,env,history) {
     ...history.slice(-(env.settings.contextMessages||24)).filter(m=>m.role==='narrator').map(m=>({id:`message:${m.id}`,kind:'narration',text:m.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,''),time:m.storyTime??m.snapshot?.time??state.time,boundary:Number.isInteger(m.eventCount??m.snapshot?.events?.length)?(m.eventCount??m.snapshot.events.length)*2-1:undefined})),
   ]:[];
   await syncVisuals(state,env,{sources});
+  env.semantics.survey();await env.semantics.flush();
 }
 
 export async function applyVisualCorrection(options) {
   const state=clone(options.state),env=environment(options,state);
   await prepareVisuals(state,env,options.messages||[]);
   correctVisuals(state,options.characterId,options.facts,options.canSee);
+  env.semantics.survey();await env.semantics.flush();
   const subject=character(state,options.characterId);
   const corrected=message(state,'narrator',`Appearance corrected for ${subject.name}.`,undefined,{visualCorrection:{characterId:subject.id,facts:clone(options.facts)}});
   return {state:clone(state),messages:[corrected]};
@@ -696,19 +715,26 @@ export async function runTurn(options) {
   const plan = await generate(env, 'Narrating surroundings', `You are the omniscient narrator/planner, NOT a character controller. Establish the opening from premise if needed. Return {"text":"player-visible narration, may be empty; never private thoughts, OOC or hidden facts","events":[],"speakers":["ordered character IDs, never player"]}. ${EVENT_SCHEMA}\nNarration text does not automatically teach characters anything: explicitly specify observable events for what witnesses should learn. Conversely do not repeat all events in text. Select only relevant speakers; silent presence persists. An absent character may receive an invitation and decide to enter in its own request. Register identifiable background people with introduction events from their first appearance, even when silent, then reuse those IDs when they speak. A new character must have a unique explicit ID and location and will undergo independent context curation. A previously prose-only background person must retain their established identity and appearance; the curator will restore only evidenced observations. Select at most ${Math.max(0, Math.min(6, env.settings.maxResponders ?? 3))} responders. Player message state is already applied; do not replay its observable segments. Process relevant events chronologically before post-skip actor contexts. Internal placement_correction events synchronize stale records from authored actions; do not narrate them as new fictional arrivals or replay those old actions.`, { world: state, history: narratorHistory([...history, ...output], limit), playerIntent: intent }, result => validatePlan(state, result, env));
   await enactPlan(env, state, plan, output);
   const max = Math.max(0, Math.min(6, Number.isInteger(env.settings.maxResponders) ? env.settings.maxResponders : 3));
-  for (const speakerId of (plan.speakers || []).slice(0, max)) {
+  const called=[];
+  for (let slot=0;slot<max;slot++) {
+    const schedule=await nextActor(env,state,plan.speakers||[],called,output,max-slot);
+    if(schedule.yieldToPlayer||schedule.nextCharacterId===null)break;
+    const speakerId=schedule.nextCharacterId;called.push(speakerId);
     aborted(env.signal);
     const who = character(state, speakerId);
-    const response = await generate(env, `${who.name} is responding`, `You play ONLY the supplied character. Your entire permitted perspective is in context; do not assume you know anything from narrator/global history or other people's private thoughts. Nearby people are physically present, not necessarily speaking. Record IDs/names are orchestration labels, not proof you learned someone's name. Nearby appearance is the current perceptible view; rememberedAppearances may be outdated. An empty view means unknown or unavailable, not that the person has no clothes or features. Use only your own observations/background; distinguish claims from truth. Decide your own speech, silence, thoughts and voluntary movement. Never control the player or another character. Return {"text":"ONLY your observable speech/actions, empty for silence; no private reasoning or narrator prose","privateState":"updated own internal state, not displayed","channel":"local|phone|online","recipients":["optional exact known IDs; remote speech must include player"],"movement":null|{"destination":"place","reason":"your OWN intention","when":"before|after"}}. Do not narrate successful movement in text until narrator resolution. Local text happens at your own physical location; you may act or talk there even when the player is elsewhere. Only actual witnesses receive it. To address an absent player use an established remote channel or choose movement before speaking. Remote communication requires explicit recipients. Choosing not to accept an invitation is valid.`, { context: characterContext(state, who.id) }, result => validateActor(state, who, result),{actor:who});
+    const response = await generate(env, `${who.name} is responding`, `You play ONLY the supplied character. Your entire permitted perspective is in context; do not assume you know anything from narrator/global history or other people's private thoughts. Nearby people are physically present, not necessarily speaking. Record IDs/names are orchestration labels, not proof you learned someone's name. Nearby appearance is the current perceptible view; rememberedAppearances may be outdated. An empty view means unknown or unavailable, not that the person has no clothes or features. Use only your own observations/background; distinguish claims from truth. Decide your own speech, silence, thoughts and voluntary movement. Never control the player or another character. Return {"text":"ONLY your observable speech/actions, empty for silence; no private reasoning or narrator prose","privateState":"updated own internal state, not displayed","channel":"local|phone|online","recipients":["optional exact known IDs; remote speech requires recipients"],"movement":null|{"destination":"place","reason":"your OWN intention","when":"before|after"}}. Do not narrate successful movement in text until narrator resolution. Local text happens at your own physical location; you may act or talk there even when the player is elsewhere. Only actual witnesses receive it. Local sound can reach nearby listeners across different location labels; physical sight and audible speech are distinct. Remote communication requires explicit recipients. Choosing not to accept an invitation is valid.`, { context: characterContext(state, who.id) }, result => validateActor(state, who, result),{actor:who});
     who.privateState = response.privateState;
     let movementAllowed = true;
     if (response.movement?.when === 'before') movementAllowed = await resolveMovement(env, state, who, response.movement, output);
-    const blockedArrival = !movementAllowed && (response.channel || 'local') === 'local' && who.location !== state.location;
+    const blockedArrival = !movementAllowed && response.movement?.when==='before';
     if (response.text.trim() && !blockedArrival) {
       validateActor(state, who, { ...response, movement: null });
       const observed = observe(state, { text: response.text, characterId: who.id, location: who.location, channel: response.channel || 'local', ...(response.recipients ? { recipients: response.recipients } : {}) }, `${who.name} (${response.channel || 'local'})`);
       await syncVisuals(state,env,{sources:visualEventSources([observed])});
-      if (observed.recipients.includes('player')) output.push(message(state, 'character', response.text, who.id));
+      await env.semantics.flush();
+      const delivery=observed.perceptions?.find(p=>p.characterId==='player');
+      if(delivery)output.push(message(state,'character',delivery.text,who.id,{speaker:delivery.speaker,sourceEventId:observed.id}));
+      else if((response.channel||'local')!=='local'&&observed.recipients.includes('player'))output.push(message(state,'character',response.text,who.id,{sourceEventId:observed.id}));
     }
     if (response.movement?.when === 'after') await resolveMovement(env, state, who, response.movement, output);
   }
@@ -755,7 +781,10 @@ export async function applyAuthoredMessage(options) {
     });
     env.allowMajorTimeSkip = plan.allowMajorTimeSkip;
     await enactPlan(env, state, plan, output, { display: false });
-    if(authored.role==='narrator')await syncVisuals(state,env,{sources:[{id:`authored:${authored.id || id()}`,kind:'narration',text:authored.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,''),time:state.time}]});
+    if(authored.role==='narrator'){
+      await syncVisuals(state,env,{sources:[{id:`authored:${authored.id || id()}`,kind:'narration',text:authored.text.replace(/\[(?:OOC|THOUGHT)\s*:[^\]]*(?:\]|$)/gi,''),time:state.time}]});
+      env.semantics.survey();await env.semantics.flush();
+    }
     if (authored.role === 'character' && plan.privateState !== undefined) character(state, authored.characterId).privateState = plan.privateState;
     output.push(message(state, authored.role, authored.text, authored.role === 'character' ? authored.characterId : undefined));
   }

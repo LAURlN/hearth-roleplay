@@ -1,7 +1,8 @@
+import {semanticReply} from './helpers/semantic-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createInitialState,runTurn,applyAuthoredMessage,characterContext} from '../src/engine.mjs';
-import {syncVisuals,correctVisuals,refreshVisualWitnesses} from '../src/visuals.mjs';
+import {createInitialState,runTurn,applyAuthoredMessage,applyVisualCorrection,characterContext} from '../src/engine.mjs';
+import {syncVisuals,correctVisuals,refreshVisualWitnesses,applyPerceivedViews} from '../src/visuals.mjs';
 
 const settings={chatModel:'actor-model',helperModel:'helper-model',maxResponders:3,contextMessages:24};
 const profile='A tall traveller, 188 cm, with black hair, a blue coat and a star tattoo hidden under a sleeve. Secretly owns the cafe.';
@@ -14,6 +15,7 @@ function scripted({plan,act,onVisual}={}) {
   const complete=async request=>{
     calls.push(request);
     const system=request.messages[0].content,data=JSON.parse(request.messages[1].content);
+    if(semanticReply(request)!==null)return semanticReply(request);
     if(system.includes('CHARACTER VISUAL STATE')) {
       assert.equal(request.model,'helper-model');
       if(onVisual){const result=onVisual(data);if(result)return JSON.stringify(result);}
@@ -99,8 +101,8 @@ test('unsourced helper changes fail atomically with one correction and no mutati
 });
 
 test('hidden physical facts remain private after manual corrections and corrections do not mutate earlier states',async()=>{
-  const original=(await turn(initial(),scripted())).state,state=structuredClone(original);
-  correctVisuals(state,'player',[{key:'hair',layer:'physical',text:'green hair',visible:'hair covered by a cap'},{key:'tattoo',layer:'physical',text:'a secret tattoo',visible:''}]);
+  const original=(await turn(initial(),scripted())).state;
+  const {state}=await applyVisualCorrection({state:original,settings,complete:scripted().complete,characterId:'player',facts:[{key:'hair',layer:'physical',text:'green hair',visible:'hair covered by a cap'},{key:'tattoo',layer:'physical',text:'a secret tattoo',visible:''}]});
   assert.match(current(state,'Ada').appearance,/cap/);
   const other=JSON.stringify(characterContext(state,person(state,'Ada').id));
   assert.ok(!other.includes('green hair'));assert.ok(!other.includes('secret tattoo'));
@@ -108,8 +110,9 @@ test('hidden physical facts remain private after manual corrections and correcti
   assert.ok(state.events.some(e=>e.type==='visual_correction'));
 });
 
-test('timed appearance changes retain intermediate witnesses instead of using final presence',async()=>{
+test('legacy visual source replay retains intermediate witnesses instead of using final presence',async()=>{
   const state=(await turn(initial(),scripted())).state,ada=person(state,'Ada'),ben=person(state,'Ben');
+  delete state.perceptionMode;
   ada.location='hall';ben.location='road';state.time=120;
   const early={id:'early',kind:'resolved event',text:'Pat puts on a red coat.',time:10,channel:'local',location:'room',recipients:[ada.id]};
   const late={id:'late',kind:'resolved event',text:'Pat changes into a green coat.',time:60,channel:'local',location:'room',recipients:[ben.id]};
@@ -141,14 +144,15 @@ test('a blind observer does not learn visual details merely from sharing the loc
     if(seed&&blindness)return {patches:[{characterId:'player',set:[patch(seed,'hair','physical','black hair','black hair')],remove:[]},{characterId:ada.id,set:[],remove:[],sight:{enabled:false,sourceId:blindness.id,excerpt:blindness.text}}]};
   }});
   const result=await turn(state,provider);
-  assert.equal(current(result.state,'Ada').appearance,'');
+  assert.ok(!characterContext(result.state,ada.id).nearby.some(c=>c.id==='player'));
   assert.equal(characterContext(result.state,ada.id).character.visual.canSee,false);
   assert.ok(!person(result.state,'Ada').knowledge.some(k=>k.source==='visual perception'));
   assert.ok(!JSON.stringify(characterContext(result.state,ada.id)).includes(profile));
 });
 
-test('restoring sight during a skipped interval uses witnesses at that boundary, before later departure',async()=>{
+test('legacy visual source replay restores sight using witnesses at that boundary',async()=>{
   const state=(await turn(initial(),scripted())).state,ada=person(state,'Ada');
+  delete state.perceptionMode;
   ada.visual.canSee=false;ada.location='hall';delete ada.seenAppearance;ada.knowledge=[];state.time=120;
   const source={id:'eyes',kind:'resolved event',text:'Ada removes her blindfold in the room.',time:10,location:'room',channel:'local',recipients:[ada.id,'player']};
   const env={visualGenerate:async(_instruction,_data,validate)=>{const result={patches:[{characterId:ada.id,set:[],remove:[],sight:{enabled:true,sourceId:source.id,excerpt:source.text}}]};validate(result);return result;}};
@@ -169,13 +173,22 @@ test('an intermediate visit during a time skip records appearance even when the 
   ];
   const provider=scripted({plan:()=>({events:[{type:'time',minutes:30}],speakers:[],text:'Half an hour passes.'}),onVisual:data=>{
     const red=data.sources.find(s=>s.text==='Pat puts on a red coat.'),green=data.sources.find(s=>s.text==='Pat changes into a green coat.');
-    if(red&&green)return {patches:[{characterId:'player',set:[patch(red,'coat','presentation','red coat','red coat'),patch(green,'coat','presentation','green coat','green coat')]}]};
+    if(red||green)return {patches:[{characterId:'player',set:[...(red?[patch(red,'coat','presentation','red coat','red coat')]:[]),...(green?[patch(green,'coat','presentation','green coat','green coat')]:[])]}]};
   }});
   const result=await turn(state,provider),visitor=person(result.state,'Ada');
   assert.match(visitor.seenAppearance?.player?.current.find(f=>f.key==='coat')?.text??'',/red coat/);
   assert.ok(!JSON.stringify(visitor.seenAppearance).includes('green coat'));
   assert.equal(visitor.location,'hall');assert.equal(result.state.time,30);
   assert.match(result.state.characters[0].appearance,/green coat/);
+});
+
+test('authorized historical views use historical sight without changing the live impairment',()=>{
+  const state=initial(),ada=person(state,'Ada');state.perceptionMode='helper';
+  state.characters[0].visual={initialized:true,revision:1,facts:[{key:'coat',layer:'presentation',text:'red coat',visible:'red coat'}]};
+  ada.visual={initialized:true,revision:0,canSee:true,facts:[]};
+  const past=structuredClone(state);past.time=5;ada.visual.canSee=false;state.time=10;
+  applyPerceivedViews(state,past,[{observerId:ada.id,subjects:[{characterId:'player',keys:['coat']}]}],'past-event');
+  assert.equal(ada.visual.canSee,false);assert.equal(ada.seenAppearance.player.time,5);assert.match(ada.seenAppearance.player.current[0].text,/red coat/);
 });
 
 test('legacy visual evidence merges narration and events by time and equal-time checkpoint boundary',async()=>{

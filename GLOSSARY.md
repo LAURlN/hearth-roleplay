@@ -37,6 +37,15 @@ The visual details a particular observer perceived at an encounter. A remembered
 A character's physical whereabouts at a particular point in the story, including their arrival at and departure from a location.
 _Avoid_: Speaking status
 
+**Perception**:
+What a person can hear, see or otherwise notice at a particular moment. Two people can share a location without perceiving the same things, or hear each other across different locations.
+
+**Perceived event**:
+The portion of an event that a particular person notices, including indistinct sounds or an unidentified voice without unseen gestures or identity.
+
+**Response opportunity**:
+A moment when a character or the player can naturally react to something they have perceived. An earlier planned conversation does not take priority over a new interruption.
+
 **Character knowledge**:
 What a character has learned or believes, which may differ from what actually happened.
 _Avoid_: World truth
