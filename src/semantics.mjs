@@ -9,7 +9,7 @@ export function createSemantics(state,env,{generate,remember,log,assertObservabl
   const list=(value,label,max=200)=>{if(!Array.isArray(value)||value.length>max)fail(`Invalid ${label}.`);return value;};
   const text=(value,label,empty=false)=>{if(typeof value!=='string'||(!empty&&!value.trim())||value.length>60000)fail(`Invalid ${label}.`);return value;};
   const person=(world,id)=>world.characters.find(c=>c.id===id)??fail('Unknown perception identity.');
-  const snapshot=()=>copy({time:state.time,timeLabel:state.timeLabel,location:state.location,locations:state.locations,characters:state.characters,sharedBackground:state.sharedBackground,publications:state.publications,events:state.events.slice(-40),eventBoundary:state.events.length});
+  const snapshot=()=>copy({time:state.time,timeLabel:state.timeLabel,location:state.location,locations:state.locations,characters:state.characters,sharedBackground:state.sharedBackground,publications:state.publications,narratorMemory:state.narratorMemory?{...state.narratorMemory,through:0}:undefined,events:state.events.slice(state.narratorMemory?.through??0),eventBoundary:state.events.length});
   function queue(event) {pending.push({kind:'local',event,world:snapshot()});}
   function survey(){pending.push({kind:'survey',world:snapshot()});}
   function exposures(){
@@ -68,9 +68,11 @@ export function createSemantics(state,env,{generate,remember,log,assertObservabl
         continue;
       }
       const event=job.event;
+      const previousPlayerViews=copy(person(state,'player').seenAppearance||{});
       const result=await generate(env,'Resolving perception',`You are the PERCEPTION HELPER, independent from narrator and actors. Resolve ONLY this supplied event at its exact boundary. Location strings are descriptive labels, not sealed rooms: nearby bushes/path, opposite doorway or adjoining positions can share sound without sharing sight. Evaluate distance, volume, obstructions, attention, line of sight and current circumstances semantically. Never move people to make perception work.
-Return {"deliveries":[{"characterId":"observer ID","text":"ONLY what THIS observer perceives","excerpts":["exact supporting substrings of event.text"],"speaker":"player-visible source label, e.g. An unseen voice"}],"views":[{"observerId":"ID","subjects":[{"characterId":"seen ID","keys":["perceptible visual fact keys"]}]}]}. Each observer has at most one delivery. Provide a current views entry for EVERY character, even when empty. For a survey there is no event: deliveries must be empty, update views only. A views subject must actually be identifiable as a physical person at this boundary; select only visible fact keys from visualSubjects. Unknown faces may be visible without learning their name. Hidden or covered features and blind observers cannot become visible.
-For events, deliver nothing to someone who cannot perceive it. A raised call can travel to a nearby path while physical actions behind bushes remain unseen. Split out only heard words when gestures/appearance are not visible. Indistinct speech grants only an indistinct sound, not full words. Nonempty event.intendedRecipients restricts delivery: do not add eavesdroppers. Omitted/empty recipients means evaluate all plausible witnesses, not all matching place names. The author already remembers their own action; don't duplicate that delivery. Explicit private thoughts/OOC and hidden world facts are never observable, regardless of world knowledge. An orchestration ID or name is not evidence someone recognized an identity. Use a neutral source label when appropriate. Cite source excerpts without inventing words, visible cues, motives or new actions. The narrator's history is evidence about geometry and conditions, not permission to disclose its secrets.`,{world,event:event?{...event,intendedRecipients:event.intendedRecipients}:null,history:env.history||[],visualSubjects:world.characters.map(c=>({id:c.id,facts:(c.visual?.facts||[]).filter(f=>f.visible).map(f=>({key:f.key,text:f.visible}))}))},r=>{
+Return {"deliveries":[{"characterId":"observer ID","text":"ONLY what THIS observer perceives","excerpts":["exact supporting substrings of event.text"],"speaker":"player-visible source label, e.g. An unseen voice"}],"views":[{"observerId":"ID","subjects":[{"characterId":"seen ID","keys":["perceptible visual fact keys"]}]}],"description":null|{"text":"player-facing prose about newly perceived appearance","evidence":[{"characterId":"seen ID","key":"approved visible fact key","excerpt":"exact visible fact text"}]}}. Each observer has at most one delivery. Provide a current views entry for EVERY character, even when empty. For a survey there is no event: deliveries must be empty, but views and an evidenced appearance description can still update. A views subject must actually be identifiable as a physical person at this boundary; select only visible fact keys from visualSubjects. Unknown faces may be visible without learning their name. Hidden or covered features and blind observers cannot become visible.
+When the player newly sees meaningful appearance details, meets a visible person for the first time, or notices an established visual change, include description with natural, concrete prose supported by approved visible keys. Do not leave a first encounter as a generic arrival when meaningful visual facts have just become available. Combine details into a readable description rather than a list of labels. Evidence must cite exact currently visible fact text, and every described subject/key must be approved in the player's views. At least one cited detail must be new or changed compared with previousPlayerViews.current. Avoid repeating unchanged descriptions, inventing features, revealing hidden identities, or asserting player decisions. Another person's invitation to look is not proof the player looked back. Looking away from a person does not establish blindness or automatically block every other view; assess actual direction and attention from the authored evidence.
+For events, preserve ALL meaningful perceptible action, gesture, movement and voice detail from the source; this is a perspective filter, not a summarizer. Do not reduce visible action prose to dialogue alone. Deliver nothing to someone who cannot perceive it. A raised call can travel to a nearby path while physical actions behind bushes remain unseen. Include only source-supported audible consequences when the observer looks away; do not invent sounds or clothing details to fill the gap. Split out only heard words when gestures/appearance are not visible. Indistinct speech grants only an indistinct sound, not full words. Nonempty event.intendedRecipients restricts delivery: do not add eavesdroppers. Omitted/empty recipients means evaluate all plausible witnesses, not all matching place names. The author already remembers their own action; don't duplicate that delivery. Explicit private thoughts/OOC and hidden world facts are never observable, regardless of world knowledge. An orchestration ID or name is not evidence someone recognized an identity. Use a neutral source label when appropriate. Cite source excerpts without inventing words, visible cues, motives or new actions. The narrator's history is evidence about geometry and conditions, not permission to disclose its secrets.`,{world,event:event?{...event,intendedRecipients:event.intendedRecipients}:null,history:env.history||[],previousPlayerViews,visualSubjects:world.characters.map(c=>({id:c.id,facts:(c.visual?.facts||[]).filter(f=>f.visible).map(f=>({key:f.key,text:f.visible}))}))},r=>{
         const seen=new Set();list(r.deliveries,'perception deliveries',world.characters.length);
         for(const delivery of r.deliveries){person(world,delivery.characterId);if(seen.has(delivery.characterId)||!event||delivery.characterId===event.characterId)fail('Invalid perception recipient.');seen.add(delivery.characterId);
           if(event.intendedRecipients?.length&&!event.intendedRecipients.includes(delivery.characterId))fail('Perception cannot widen an explicitly restricted audience.');
@@ -86,6 +88,23 @@ For events, deliver nothing to someone who cannot perceive it. A raised call can
           for(const subject of view.subjects){const target=person(world,subject.characterId);if(target.id===observer.id||subjects.has(target.id)||observer.visual?.canSee===false)fail('Invalid visible subject.');subjects.add(target.id);list(subject.keys,'visible detail keys',80);for(const key of subject.keys)if(!target.visual?.facts?.some(f=>f.key===key&&f.visible))fail('Only established visible details can be perceived.');}
         }
         if(observers.size!==world.characters.length)fail('Every character needs a current visibility decision.');
+        if(r.description!=null){
+          if(typeof r.description!=='object'||Array.isArray(r.description))fail('Invalid perceived description.');
+          text(r.description.text,'perceived description');list(r.description.evidence,'description evidence',80);
+          if(!r.description.evidence.length)fail('Perceived description requires visible evidence.');
+          const playerView=r.views.find(v=>v.observerId==='player');
+          let changed=false;
+          for(const evidence of r.description.evidence){
+            if(!evidence||typeof evidence!=='object')fail('Invalid description evidence.');
+            const target=person(world,evidence.characterId),subject=playerView.subjects.find(s=>s.characterId===target.id);
+            const fact=target.visual?.facts?.find(f=>f.key===evidence.key&&f.visible);
+            text(evidence.excerpt,'description excerpt');
+            if(!subject?.keys.includes(evidence.key)||!fact||evidence.excerpt!==fact.visible)fail('Description must cite an approved currently visible detail.');
+            if(!previousPlayerViews[target.id]?.current?.some(f=>f.key===evidence.key&&f.text===fact.visible))changed=true;
+          }
+          if(!changed)fail('Perceived description must include a newly perceived or changed detail.');
+          assertObservable({...state,characters:world.characters},r.description.text,{characterId:event?.characterId});
+        }
       },{helper:true});
       if(event){
         event.perceptions=copy(result.deliveries);event.recipients=[...new Set([...(event.characterId?[event.characterId]:[]),...result.deliveries.map(d=>d.characterId)])];
@@ -93,6 +112,7 @@ For events, deliver nothing to someone who cannot perceive it. A raised call can
       }
       applyViews(state,world,result.views,event?.id);
       if(event)log(state,{type:'perception_decision',observedAt:world.time,eventId:event.id,deliveries:copy(result.deliveries),views:copy(result.views)});
+      if(result.description)env.onPerceivedDescription?.(result.description.text,{...(event?{eventId:event.id}:{}),evidence:copy(result.description.evidence)});
     }
   }
   return {queue,survey,exposures,flush};

@@ -15,7 +15,13 @@ function provider({interpret,placement,plan,actor,movement}={}){
     if(semanticReply(request)!==null)return semanticReply(request);
     if(system.includes('CHARACTER VISUAL STATE'))return '{"patches":[]}';
     if(system.includes('PLAYER PLACEMENT RESOLVER')){assert.equal(request.model,'helper-model');return JSON.stringify(placement?placement(data):{correction:null,placements:[]});}
-    if(system.includes('private input interpreter'))return JSON.stringify(interpret?interpret(data):{segments:[{kind:'action',text:data.input}],allowMajorTimeSkip:false});
+    if(system.includes('private input interpreter')){
+      const parsed=interpret?interpret(data):{segments:[{kind:'action',text:data.input}],allowMajorTimeSkip:false};
+      const actions=parsed.segments.flatMap((s,index)=>s.kind==='action'&&!s.destination?[{index,text:s.text}]:[]);
+      const decision=placement&&(actions.length||data.priorActions?.length)?placement({...data,world:data.state,actions}):{correction:null,placements:[]};
+      for(const item of decision.placements||[])Object.assign(parsed.segments[item.index],{destination:item.destination,destinationEvidence:item.excerpt});
+      return JSON.stringify({...parsed,correction:decision.correction});
+    }
     if(system.includes('omniscient narrator/planner'))return JSON.stringify(plan?plan(data):{events:[],speakers:[],text:'The room is quiet.'});
     if(system.includes('You play ONLY'))return JSON.stringify(actor(data));
     if(system.includes('resolving feasibility'))return JSON.stringify(movement?movement(data):{allowed:true,text:'Cy steps into the reading nook.',reason:'An open passage connects the rooms.'});
@@ -115,7 +121,7 @@ test('private spans and spoken suggestions cannot be used as placement evidence'
   }
   const state=world(),input='[THOUGHT: I enter the nook.] I scratch my chin.';
   const p=provider({interpret:()=>({segments:[{kind:'thought',text:'[THOUGHT: I enter the nook.]'},{kind:'action',text:'I scratch my chin.'}],allowMajorTimeSkip:false}),placement:()=>({correction:null,placements:[{index:0,destination:'reading nook',excerpt:'I enter the nook.'}]})});
-  await assert.rejects(run(state,p,input),/permitted observable action/);
+  await assert.rejects(run(state,p,input),/Private segments|observable action/);
   assert.equal(state.location,'atrium');
 });
 

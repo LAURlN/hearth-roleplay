@@ -43,7 +43,7 @@ export async function createApp({dataDir=process.env.HEARTH_DATA_DIR||path.join(
       if(origin && origin!==`http://${host}`) throw fail('Cross-origin requests are not allowed.',403);
       const url=new URL(request.url,`http://${host}`),pathname=decodeURIComponent(url.pathname);
       const method=request.method;
-      if(method==='GET'&&pathname==='/api/bootstrap') return send({settings:await store.settings(),stories:await store.list(),version:'1.0.0',instance});
+      if(method==='GET'&&pathname==='/api/bootstrap') return send({settings:await store.settings(),stories:await store.list(),version:'1.1.0',instance});
       if(method==='GET'&&pathname==='/api/settings') return send(await store.settings());
       if(method==='PUT'&&pathname==='/api/settings') {
         const body=await jsonBody(request);

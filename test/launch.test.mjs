@@ -7,11 +7,27 @@ import { mkdtemp,writeFile,readFile,rm,mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { selectPort,ensureProxy,runningInstance,launch,freePort } from '../scripts/launch.mjs';
+import { selectPort,ensureProxy,runningInstance,launch,freePort,ensureDependencies } from '../scripts/launch.mjs';
 import { directoryIdentity } from '../src/store.mjs';
 import { DEFAULT_SETTINGS } from '../src/settings.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+test('launcher installs pinned tokenizer dependencies only when missing or changed, without install scripts',async()=>{
+  const directory=await mkdtemp(path.join(os.tmpdir(),'hearth-dependencies-'));
+  try{
+    const packages={'node_modules/js-tiktoken':{version:'1.0.21'},'node_modules/base64-js':{version:'1.5.1'}};
+    await writeFile(path.join(directory,'package-lock.json'),JSON.stringify({packages}));
+    let calls=0;
+    const runImpl=async(_command,args,{cwd})=>{
+      calls++;assert.equal(cwd,directory);assert.deepEqual(args,['ci','--ignore-scripts','--no-audit','--no-fund']);
+      for(const [name,entry] of Object.entries(packages)){await mkdir(path.join(directory,name),{recursive:true});await writeFile(path.join(directory,name,'package.json'),JSON.stringify(entry));}
+    };
+    await ensureDependencies({root:directory,runImpl});assert.equal(calls,1);
+    await ensureDependencies({root:directory,runImpl});assert.equal(calls,1);
+    await writeFile(path.join(directory,'node_modules/js-tiktoken/package.json'),'{"version":"old"}');
+    await ensureDependencies({root:directory,runImpl});assert.equal(calls,2);
+  }finally{if(path.dirname(directory)!==os.tmpdir())throw new Error('Unexpected test directory');await rm(directory,{recursive:true,force:true});}
+});
 test('launcher chooses a free adjacent port, reuses Hearth, and respects explicit port conflicts',async()=>{
   const busy=async()=>({reachable:true,status:200,body:{other:true}}),available=async port=>port===8002;
   assert.deepEqual(await selectPort({probeImpl:busy,freePortImpl:available}),{port:8002,existing:false});

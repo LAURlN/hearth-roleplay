@@ -3,10 +3,19 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath,pathToFileURL } from 'node:url';
 import { readFile,writeFile } from 'node:fs/promises';
-import { createApp } from '../server.mjs';
 import { Store, directoryIdentity } from '../src/store.mjs';
 
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+
+export async function ensureDependencies({root=ROOT,runImpl=run}={}){
+  const lock=JSON.parse(await readFile(path.join(root,'package-lock.json'),'utf8'));
+  const packages=Object.entries(lock.packages||{}).filter(([name])=>name.startsWith('node_modules/'));
+  const matches=await Promise.all(packages.map(async([name,entry])=>{
+    try{return JSON.parse(await readFile(path.join(root,name,'package.json'),'utf8')).version===entry.version;}catch{return false;}
+  }));
+  if(matches.every(Boolean))return;
+  await runImpl(process.platform==='win32'?'npm.cmd':'npm',['ci','--ignore-scripts','--no-audit','--no-fund'],{cwd:root,shell:process.platform==='win32'});
+}
 
 export async function probe(url,{fetchImpl=fetch}={}) {
   try {
@@ -102,6 +111,7 @@ export async function launch({args=process.argv.slice(2),env=process.env,log=con
     // Start a fresh interpreter so the updated server code is loaded too.
     await run(process.execPath,[fileURLToPath(import.meta.url)]);return;
   }
+  await ensureDependencies();
   const settings=await store.settings();
   await ensureProxyImpl(settings);
   // A newly started proxy can occupy the preferred app port. Choose only once
@@ -112,6 +122,7 @@ export async function launch({args=process.argv.slice(2),env=process.env,log=con
   if(env.HEARTH_WAKE_LOCK!=='0') {
     const wake=spawn('termux-wake-lock',[],{stdio:'ignore',windowsHide:true});wake.on('error',()=>{});
   }
+  const {createApp}=await import('../server.mjs');
   const app=await createApp({dataDir:directory});
   try {await new Promise((resolve,reject)=>{app.server.once('error',reject);app.server.listen(choice.port,'127.0.0.1',resolve);});}
   catch(error){await app.close();throw error;}

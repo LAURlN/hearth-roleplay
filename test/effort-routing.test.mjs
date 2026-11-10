@@ -5,9 +5,9 @@ import {Illustrator} from '../src/illustrator.mjs';
 import {DEFAULT_SETTINGS} from '../src/settings.mjs';
 
 test('memory helpers receive helper effort for character and narrator summaries',async()=>{
-  const state={time:10,characters:[{name:'Ada',knowledge:[{id:'one',text:'An attributed claim.'},{id:'two',text:'A later observation.'}]}],events:Array.from({length:240},(_,i)=>({id:String(i),text:'Timeline event'}))};
+  const state={time:10,characters:[{id:'ada',name:'Ada',knowledge:[{id:'one',text:'An attributed claim.'},{id:'two',text:'A later observation.'}]}],events:Array.from({length:240},(_,i)=>({id:String(i),text:'Timeline event'}))};
   const requests=[];
-  await compactKnowledge(state,{settings:{...DEFAULT_SETTINGS,helperModel:'helper-model',helperEffort:'low',chatEffort:'high'},threshold:2,tail:0,complete:async request=>{requests.push(request);return '{"summary":"A faithful summary."}';}});
+  await compactKnowledge(state,{settings:{...DEFAULT_SETTINGS,contextTokenLimit:25,helperModel:'helper-model',helperEffort:'low',chatEffort:'high'},buildRequest:(s,_messages,_settings,owner)=>[{role:'user',content:(owner==='narrator'?s.narratorMemory:s.characters[0].memory)?.summary??'x'.repeat(30)}],counter:messages=>messages[0].content.length,complete:async request=>{requests.push(request);return '{"summary":"A faithful summary."}';}});
   assert.equal(requests.length,2);
   for(const request of requests){assert.equal(request.model,'helper-model');assert.equal(request.reasoningEffort,'low');}
 });

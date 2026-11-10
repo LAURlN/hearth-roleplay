@@ -1,9 +1,9 @@
-import { createInitialState, runTurn, applyAuthoredMessage,applyVisualCorrection,applyCharacterPrompt } from './engine.mjs';
+import { createInitialState, runTurn, applyAuthoredMessage,applyVisualCorrection,applyCharacterPrompt,buildContextRequest } from './engine.mjs';
 import {validateVisualFacts} from './visuals.mjs';
 import { makeId, clone, branchWorld, publicStory } from './store.mjs';
 import { createProvider } from './provider.mjs';
 import { Illustrator } from './illustrator.mjs';
-import { compactKnowledge,narratorProjection } from './memory.mjs';
+import { compactKnowledge,narratorProjection,contextUsage } from './memory.mjs';
 import { loggedProvider,formatDebugLog,appendDebugError } from './debug-log.mjs';
 
 const failure=(message,status=400,code)=>Object.assign(new Error(message),{status,code});
@@ -26,9 +26,20 @@ export function validateSetup(input) {
 
 export class StoryService {
   constructor(store,{makeProvider=createProvider}={}) {
-    this.store=store;this.makeProvider=makeProvider;this.busy=new Map();this.illustrator=new Illustrator({store,makeProvider});
+    this.store=store;this.makeProvider=makeProvider;this.busy=new Map();this.usageCache=new Map();this.illustrator=new Illustrator({store,makeProvider});
   }
-  async view(id) { return publicStory(await this.store.get(id),this.busy.get(id)); }
+  async view(id) {
+    const story=await this.store.get(id),settings=await this.store.settings(),branch=story.branches[story.activeBranchId];
+    const key=JSON.stringify([story.version,story.activeBranchId,settings]);
+    let cached=this.usageCache.get(id);
+    if(cached?.key!==key){
+      let usage;
+      try{usage={narrator:contextUsage(branchWorld(branch),transcript(branch.messages),settings,buildContextRequest)};}
+      catch(error){usage={narrator:{error:error.message,threshold:settings.contextTokenLimit??300000}};}
+      cached={key,usage};this.usageCache.set(id,cached);
+    }
+    return {...publicStory(story,this.busy.get(id)),contextUsage:cached.usage};
+  }
   async metadata(id,input) {
     this.ensureFree(id);
     if(!input||typeof input!=='object'||Array.isArray(input)||(input.title===undefined&&input.archived===undefined))throw failure('Choose a title or archive change.');
@@ -80,7 +91,7 @@ export class StoryService {
         lease.controller.signal.throwIfAborted();
       });
     } catch(error) {
-      if(traceContext)await appendDebugError(this.store,{...traceContext,stage:lease.stage,operation:'story',terminal:true},error).catch(()=>{});
+      if(traceContext)await appendDebugError(this.store,{...traceContext,stage:error.stage??lease.stage,operation:'story',terminal:true},error).catch(()=>{});
       throw error;
     } finally {if(this.busy.get(id)===lease) this.busy.delete(id);}
     if(illustrate) await this.illustrator.schedule(id).catch(()=>{});
@@ -90,7 +101,7 @@ export class StoryService {
     if(input!==null) text(input,'message');
     return this.operation(id,version,async (story,env)=>{
       const branch=story.branches[story.activeBranchId];
-      const state=await compactKnowledge(branchWorld(branch),env);
+      const state=await compactKnowledge(branchWorld(branch),{...env,messages:transcript(branch.messages),buildRequest:buildContextRequest});
       const result=await runTurn({...env,state,messages:transcript(branch.messages),input});
       branch.messages.push(...result.messages);
     });
@@ -117,7 +128,7 @@ export class StoryService {
         branch.messages.push(...result.messages);state=result.state;
       }
       if(input.regenerate===true||(mode!=='rewind'&&input.regenerate!==false)) {
-        state=await compactKnowledge(state,env);
+        state=await compactKnowledge(state,{...env,messages:transcript(branch.messages),buildRequest:buildContextRequest});
         const continuation=await runTurn({...env,state,messages:transcript(branch.messages),input:null});
         branch.messages.push(...continuation.messages);
       }
@@ -136,7 +147,7 @@ export class StoryService {
     if(lease) lease.controller.abort(new DOMException('Generation stopped. No incomplete turn was saved.','AbortError'));
     return {cancelled:Boolean(lease)};
   }
-  async remove(id) {this.ensureFree(id);await this.illustrator.cancel(id);await this.store.remove(id);return {ok:true};}
+  async remove(id) {this.ensureFree(id);await this.illustrator.cancel(id);await this.store.remove(id);this.usageCache.delete(id);return {ok:true};}
   async illustrate(id,{messageId,expectedVersion}) {
     this.ensureFree(id);this.assertVersion(await this.store.get(id),expectedVersion);
     await this.illustrator.schedule(id,{manual:true,messageId});return this.view(id);

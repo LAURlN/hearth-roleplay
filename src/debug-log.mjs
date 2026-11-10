@@ -21,8 +21,8 @@ export function appendDebugError(store,context,error) {
 }
 
 export function loggedProvider(provider,{store,settings,getContext}) {
-  async function recorded(operation,request,perform) {
-    const context={...getContext(),requestId:randomUUID(),operation};
+  async function recorded(operation,request,perform,stage) {
+    const context={...getContext(),...(stage?{stage}:{}),requestId:randomUUID(),operation};
     await store.appendDebug(context.storyId,{...context,kind:'request',at:new Date().toISOString(),request:printable(request)});
     try {
       const response=await perform();
@@ -36,7 +36,7 @@ export function loggedProvider(provider,{store,settings,getContext}) {
   }
   return {
     ...provider,
-    complete:request=>recorded('text',{model:request.model??settings.chatModel,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{}),messages:request.messages},()=>provider.complete(request)),
+    complete:request=>recorded('text',{model:request.model??settings.chatModel,...(request.reasoningEffort?{reasoningEffort:request.reasoningEffort}:{}),messages:request.messages},()=>provider.complete(request),request.stage),
     image:request=>recorded('image',{model:settings.imageModel,quality:settings.imageQuality,size:settings.imageSize,prompt:request.prompt,referenceImages:(request.references??[]).map(reference=>imageInfo(reference.bytes,reference.type))},()=>provider.image(request)),
   };
 }

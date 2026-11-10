@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { createApp } from '../server.mjs';
+import {buildContextRequest} from '../src/engine.mjs';
+import {countMessages} from '../src/tokens.mjs';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPz0AAAAASUVORK5CYII=','base64');
 const setup={title:'The Lantern',premise:'A quiet inn on a rainy night.',persona:{name:'Rowan',description:'A traveller.'},characters:[{name:'Ada',appearance:'Red scarf',description:'An innkeeper.'}]};
@@ -82,6 +84,9 @@ test('complete story turn is durable and exposes no internal snapshots to the UI
   assert.equal(advanced.version,2);assert.ok(advanced.branch.messages.some(m=>m.text==='I order tea.'));
   const saved=await f.store.get(story.id);assert.ok(saved.branches[saved.activeBranchId].messages.at(-1).snapshot);
   assert.ok(advanced.world.characters.find(c=>c.name==='Ada').knowledge.some(k=>k.text==='I order tea.'));
+  const savedBranch=saved.branches[saved.activeBranchId];
+  const expected=countMessages(buildContextRequest(savedBranch.messages.at(-1).snapshot,savedBranch.messages,await f.store.settings())).tokens;
+  assert.equal(advanced.contextUsage.narrator.tokens,expected);assert.equal(advanced.contextUsage.narrator.threshold,300000);assert.equal(advanced.contextUsage.narrator.approximate,true);
   assert.equal((await f.request(route(story)+'/turn','POST',{text:'stale request',expectedVersion:story.version})).status,409);
 });
 
@@ -134,9 +139,10 @@ test('downloadable AI logs cover requests, failed revisions, and survive rollbac
 
 test('post-response helper validation failures are logged with terminal turn metadata despite rollback',async t=>{
   const f=await fixture(t),story=(await f.request('/api/stories','POST',setup)).body;
+  await f.store.saveSettings({contextTokenLimit:10000});
   await f.store.mutate(story.id,undefined,s=>{
     const world=s.branches[s.activeBranchId].messages.at(-1).snapshot;
-    world.characters.find(c=>c.name==='Ada').knowledge=Array.from({length:180},(_,i)=>({id:`observation-${i}`,text:`Observation ${i}`,source:'perception',time:0}));
+    world.characters.find(c=>c.name==='Ada').knowledge=Array.from({length:180},(_,i)=>({id:`observation-${i}`,text:`Observation ${i}: `+'A detailed account of the local weather and daily conversation. '.repeat(25),source:'perception',time:0}));
   },{bump:false});
   const original=await f.store.get(story.id);
   f.fake.provider.complete=async()=>'{"summary":""}';

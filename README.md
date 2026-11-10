@@ -34,7 +34,7 @@ To choose a port yourself:
 PORT=8002 hearth
 ```
 
-Hearth calls the proxy from its own backend, so no SillyTavern CORS setting or extension is required. Node 22+ is required; the app itself needs no dependency installation or build. The launcher requests Termux's wake lock when available; set `HEARTH_WAKE_LOCK=0` to skip it. Set `HEARTH_NO_BROWSER=1` to avoid opening a browser automatically.
+Hearth calls the proxy from its own backend, so no SillyTavern CORS setting or extension is required. Node 22+ is required. The launcher installs pinned pure-JavaScript tokenizer dependencies when missing or changed; no native compilation or app build is needed. The launcher requests Termux's wake lock when available; set `HEARTH_WAKE_LOCK=0` to skip it. Set `HEARTH_NO_BROWSER=1` to avoid opening a browser automatically.
 
 Android may pause or stop Termux in the background. Use Termux's wake lock and your device's battery settings if you want long-running generations. Saved story turns survive restarts; an interrupted turn is not partially committed.
 
@@ -42,7 +42,7 @@ For an existing manual installation, run `bash scripts/termux-start.sh`, or star
 
 ## Run on Windows
 
-With Node 22+ installed, run `npm start` in this directory. To change the port in PowerShell:
+With Node 22+ installed, run `npm ci --ignore-scripts`, then `npm start` in this directory. To change the port in PowerShell:
 
 ```powershell
 $env:PORT = '8001'
@@ -84,15 +84,21 @@ Write naturally. For unambiguous private content, use:
 
 The narrator interprets the original input. Character requests receive only their own background, private state, shared background and permitted observations. Private player fragments are not copied into character conversation history. Ordinary prose still requires model interpretation; explicit markers provide a stronger boundary for sensitive story secrets.
 
-An authored action can establish location without an explicit walking command: sitting at an established bench or boarding a vehicle places the player there. The helper resolves missing placement from the action, known locations and recent history before subsequent speech/actor contexts. Suggestions, private thoughts and OOC spans do not serve as movement evidence. A clear stale location in an older save can be repaired on Continue from retained observable player actions, without inventing a new arrival, replaying old dialogue or undoing a later established movement. These semantic decisions use the configured helper model and appear under “Resolving player placement” in the debug log.
+An authored action can establish location without an explicit walking command: sitting at an established bench or boarding a vehicle places the player there. The input helper resolves classification and placement together from the action, known locations and history before subsequent speech/actor contexts. This request overlaps initial visual preparation using a frozen starting checkpoint. Suggestions, private thoughts and OOC spans do not serve as movement evidence. Continue retains a dedicated helper for conservative repair of older saves. Repair does not invent an arrival, replay old dialogue or undo a later established movement.
 
 An independent **perception helper** resolves each local event before the next character acts. It considers sound, distance, obstructions, attention and sight rather than comparing location names. A call from nearby bushes can reach someone on the path without revealing the caller's face, gestures or identity. Each listener receives only their own perceived version. Equal locations do not force everyone to hear every word or see hidden details. Nonempty recipients restrict an intended private audience; the helper can withhold delivery when that person cannot perceive it. Explicit remote channels retain recipient and connectivity checks.
+
+Perception preserves meaningful observable actions and gestures instead of summarizing them away. Newly noticed appearance details can also become player-visible narration, with evidence checked against the details actually approved for the player's sight. Hidden or unchanged details cannot be added as a new description. Looking away from one person does not mean global blindness, and permission to look back does not invent that player action. Unseen actions remain unseen; other characters still receive the observations they can perceive.
 
 A **reactive scheduling helper** chooses the next character after those observations have resolved. The narrator's speaker suggestions are advisory; an interruption can change the order, and a character can react to new information later in the same turn. The helper yields when the player should respond rather than making the cast continue talking past a new call or question. Maximum character responders is a request cap, not a target. Helpers do not author character decisions or player actions.
 
 The World & knowledge inspector shows whereabouts, sources, observations, publications, and resolved exposure decisions. A **public-awareness helper** judges actual exposure from access, activity, geography, interests, connections and elapsed time; there are no fixed awareness probabilities. Historical opportunities are resolved during skips before publication expiry. Perception and awareness decisions are saved with source/time, so branches and rewind restore them with knowledge. Code enforces identities, explicit privacy restrictions, source citations, chronological boundaries and atomic saves. Semantic judgments depend on the selected helper model; these helpers add subscription requests and latency, all visible in the debug log.
 
-For longer stories, older observations are summarized separately for their owner, with recent observations kept verbatim. The narrator has its own continuity notes. Original records remain in saved checkpoints, so rewind restores the corresponding summaries and evidence as well. Summary generation also uses the subscription proxy.
+There is **no message-count context cutoff**. Each character retains their full permitted observations, and the narrator retains its full conversation/event context, until that owner's assembled text request reaches **Context compaction threshold**, default **300,000 tokens**. A helper then summarizes approximately the oldest two thirds of that owner's retained dynamic context by token weight, merges their previous summary, and keeps the recent third verbatim. Whole source boundaries are preserved; a single oversized source may be summarized whole. Stable system rules, character profiles and current state remain in context. Narrator compression never advances a character's personal memory boundary.
+
+The chat footer and World inspector show the current narrator context estimate and configured threshold. Counting uses local `o200k_base` BPE, including assembled system/payload text and estimated message framing. Proxy model aliases, hidden server framing and tokenizers may differ, so the display explicitly says approximate; this is not a provider-reported usage total. Choose a threshold that fits both your chat and helper models. If one prefix summary still leaves the request above the threshold, the turn fails clearly rather than silently dropping context or changing models.
+
+Independent character and narrator summaries run with at most two requests in flight. All summaries validate before their memory changes commit together. Startup requests also cancel and drain together on failure. Character responses, perception and chronological events stay ordered; illustration already runs in the background. Original records and memory boundaries remain in saved checkpoints, so rewind restores the corresponding knowledge and summaries. Every request retains its own debug stage even when calls overlap.
 
 ## Editing, branches, and rewind
 
@@ -127,6 +133,7 @@ For troubleshooting, open **Story options → AI debug log**. Refresh, select/co
 Logs begin with requests after this update; older prompts cannot be recovered. They live under ignored `data/debug/`, are excluded from story exports, and are removed when their story is deleted. Rewind restores fictional knowledge but retains the debugging record of abandoned attempts. Logs contain all private character contexts, thoughts and OOC, so inspect them before sharing. Transport headers and OAuth credentials are never logged.
 
 ```sh
+npm ci --ignore-scripts
 npm run check
 npm test
 ```

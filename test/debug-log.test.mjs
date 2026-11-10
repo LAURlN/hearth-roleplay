@@ -30,6 +30,19 @@ test('logs retain exact model prompts/replies and persist independently of disca
   assert.ok(!log.includes('DO-NOT-LOG'));
 });
 
+test('parallel requests retain their own stage when completion order and global progress change',async t=>{
+  const f=await fixture(t);let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const provider=f.wrap({complete:async request=>{if(request.stage==='Preparing input')await gate;return request.stage;}});
+  const first=provider.complete({stage:'Preparing input',messages:[]});f.context.stage='Other progress';
+  const second=provider.complete({stage:'Checking appearance',messages:[]});
+  await second;release();await first;
+  const records=await f.store.debugRecords('story');
+  for(const stage of ['Preparing input','Checking appearance']){
+    const group=records.filter(r=>r.stage===stage);assert.equal(group.length,2);assert.equal(group[0].requestId,group[1].requestId);assert.equal(group[1].response,stage);
+  }
+});
+
 test('empty provider responses and cancellation errors keep diagnostic responses without retry',async t=>{
   const f=await fixture(t);let calls=0;
   const raw={choices:[{message:{content:''},finish_reason:'stop'}]};

@@ -18,7 +18,7 @@ Return ONLY JSON with {"generate":true|false,"reason":"short explanation","capti
 
 export const CHARACTER_PROMPT = `Portray the supplied person as an independent character with a consistent voice, personality and motives. Respond naturally to what they perceive and remember. Let them disagree, misunderstand, hesitate or stay silent when appropriate. Distinguish their beliefs from world truth. Character-specific instructions refine portrayal; they do not grant access to other people's private thoughts or unobserved events. Keep observable speech/actions separate from private internal state and preserve the player's agency.`;
 
-export const DEFAULT_SETTINGS = Object.freeze({ proxyBaseUrl:'http://127.0.0.1:10531/v1', chatModel:'gpt-6.1-sol', helperModel:'', imageModel:'gpt-image-2', chatEffort:'', characterEffort:'', helperEffort:'', illustratorEffort:'', roleplayPrompt:ROLEPLAY_PROMPT, characterPrompt:CHARACTER_PROMPT, illustratorPrompt:ILLUSTRATOR_PROMPT, autoIllustrate:true, imageCooldown:3, imageQuality:'medium', imageSize:'1024x1024', maxResponders:3, contextMessages:24, requestTimeoutMs:180000 });
+export const DEFAULT_SETTINGS = Object.freeze({ proxyBaseUrl:'http://127.0.0.1:10531/v1', chatModel:'gpt-6.1-sol', helperModel:'', imageModel:'gpt-image-2', chatEffort:'', characterEffort:'', helperEffort:'', illustratorEffort:'', roleplayPrompt:ROLEPLAY_PROMPT, characterPrompt:CHARACTER_PROMPT, illustratorPrompt:ILLUSTRATOR_PROMPT, autoIllustrate:true, imageCooldown:3, imageQuality:'medium', imageSize:'1024x1024', maxResponders:3, contextTokenLimit:300000, requestTimeoutMs:180000 });
 
 export function validateProxyUrl(value) {
   let url;
@@ -29,6 +29,7 @@ export function validateProxyUrl(value) {
 
 export function normalizeSettings(input = {}, base = DEFAULT_SETTINGS) {
   const settings = {...base};
+  delete settings.contextMessages;
   for (const key of Object.keys(DEFAULT_SETTINGS)) if (input[key] !== undefined) settings[key] = input[key];
   settings.proxyBaseUrl = validateProxyUrl(settings.proxyBaseUrl);
   for(const key of ['chatEffort','characterEffort','helperEffort','illustratorEffort']) {
@@ -41,7 +42,8 @@ export function normalizeSettings(input = {}, base = DEFAULT_SETTINGS) {
   for (const key of ['chatModel','imageModel','roleplayPrompt','illustratorPrompt']) {
     if (typeof settings[key] !== 'string' || !settings[key].trim() || settings[key].length > (key.endsWith('Prompt') ? 60000 : 150)) throw new Error(`Invalid ${key}.`);
   }
-  for (const [key,min,max] of [['imageCooldown',0,30],['maxResponders',1,6],['contextMessages',8,100],['requestTimeoutMs',10000,600000]]) {
+  if(settings.contextTokenLimit===undefined)settings.contextTokenLimit=DEFAULT_SETTINGS.contextTokenLimit;
+  for (const [key,min,max] of [['imageCooldown',0,30],['maxResponders',1,6],['contextTokenLimit',1024,10000000],['requestTimeoutMs',10000,600000]]) {
     if (!Number.isInteger(settings[key]) || settings[key] < min || settings[key] > max) throw new Error(`${key} must be between ${min} and ${max}.`);
   }
   if (typeof settings.autoIllustrate !== 'boolean') throw new Error('autoIllustrate must be true or false.');

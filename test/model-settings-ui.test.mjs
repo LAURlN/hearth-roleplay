@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
-import {DEFAULT_SETTINGS} from '../src/settings.mjs';
+import {DEFAULT_SETTINGS,normalizeSettings} from '../src/settings.mjs';
 
 async function controller(api){
   const source=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
@@ -20,7 +20,8 @@ async function controller(api){
   };
   const state={settings:{...DEFAULT_SETTINGS,chatModel:'saved-model',helperModel:'helper-a',chatEffort:'high'},models:[],modelRequest:0,settingsLoading:false};
   const settingsFields=vm.runInNewContext(source.match(/const settingsFields = ([\s\S]*?);/)[1]);
-  const context={state,$:field,node:(_tag,_class,text='')=>({textContent:text,value:''}),settingsFields,numericSettings:new Set(['imageCooldown','maxResponders','contextMessages']),api,setDrawer(){},inlineError(){},openDialog(){},toast(){}};
+  const numericSettings=vm.runInNewContext(source.match(/const numericSettings = ([\s\S]*?);/)[1]);
+  const context={state,$:field,node:(_tag,_class,text='')=>({textContent:text,value:''}),settingsFields,numericSettings,api,setDrawer(){},inlineError(){},openDialog(){},toast(){}};
   vm.runInNewContext(source.slice(start,end),context);
   return {state,field,handlers,context};
 }
@@ -61,4 +62,46 @@ test('a late model response cannot replace a newer connection catalog',async()=>
   resolveOld({connected:true,models:[{id:'old-model'}]});await old;
   assert.ok(c.field('setting-chatModel').options.some(option=>option.value==='new-model'));
   assert.ok(!c.field('setting-chatModel').options.some(option=>option.value==='old-model'));
+});
+
+test('context threshold replaces legacy message count and settings submission sends a number',async()=>{
+  assert.equal(DEFAULT_SETTINGS.contextTokenLimit,300000);assert.equal(DEFAULT_SETTINGS.contextMessages,undefined);
+  const legacyBase={...DEFAULT_SETTINGS,contextMessages:8};delete legacyBase.contextTokenLimit;
+  const restored=normalizeSettings({contextMessages:12},legacyBase);
+  assert.equal(restored.contextTokenLimit,300000);assert.equal(restored.contextMessages,undefined);
+  for(const invalid of [0,1023,10000001,1.5,'300000',null])assert.throws(()=>normalizeSettings({contextTokenLimit:invalid}),/contextTokenLimit/);
+  let submitted;
+  const c=await controller(async(path,request)=>{
+    if(path==='/api/settings'){submitted=request.body;return normalizeSettings(request.body);}
+    return {connected:true,models:[]};
+  });
+  c.context.populateSettings();assert.equal(c.field('setting-contextTokenLimit').value,'300000');
+  c.field('setting-contextTokenLimit').value='64000';
+  await c.handlers.get('settings-form:submit')({preventDefault(){}});
+  assert.equal(submitted.contextTokenLimit,64000);assert.equal(submitted.contextMessages,undefined);
+  assert.equal(submitted.chatEffort,'high');assert.equal(submitted.helperModel,'helper-a');
+});
+
+test('narrator context counters show estimates, threshold and unavailable states without inventing counts',async()=>{
+  const source=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  const start=source.indexOf('  function narratorContextUsage('),end=source.indexOf('  function updateControls()',start);
+  const fields=new Map(),state={story:undefined};
+  const context={state,$:id=>{if(!fields.has(id))fields.set(id,{setAttribute(key,value){this[key]=value;}});return fields.get(id);}};
+  vm.runInNewContext(source.slice(start,end),context);
+  context.renderContextUsage();
+  for(const field of fields.values())assert.equal(field.textContent,'Context count unavailable');
+  state.story={contextUsage:{narrator:{tokens:12345,threshold:300000,encoding:'o200k_base',approximate:true}}};
+  context.renderContextUsage();
+  for(const field of fields.values()){
+    assert.equal(field.textContent,`Narrator context ~${(12345).toLocaleString()} / ${(300000).toLocaleString()} tokens`);
+    assert.match(field['aria-label'],/approximately/);assert.match(field.title,/o200k_base/);
+  }
+  state.story.contextUsage.narrator={tokens:12345,threshold:300000,error:'Tokenizer unavailable'};
+  context.renderContextUsage();
+  for(const field of fields.values()){assert.equal(field.textContent,'Context count unavailable');assert.match(field.title,/Tokenizer unavailable/);assert.ok(!field.textContent.includes('0 /'));}
+  state.story.contextUsage.narrator={tokens:0,threshold:64000,encoding:'o200k_base',approximate:true};
+  context.renderContextUsage();assert.match(fields.get('context-status').textContent,/~0 \/ /);
+  const html=await readFile(new URL('../public/index.html',import.meta.url),'utf8');
+  assert.match(html,/id="context-status"/);assert.match(html,/id="inspector-context-status"/);
+  assert.match(html,/id="setting-contextTokenLimit"[^>]*type="number"[^>]*min="1024"/);assert.ok(!html.includes('setting-contextMessages'));
 });

@@ -12,8 +12,8 @@
   };
   const settingsFields = ['proxyBaseUrl', 'chatModel', 'helperModel', 'imageModel', 'chatEffort', 'characterEffort', 'helperEffort', 'illustratorEffort', 'roleplayPrompt', 'characterPrompt',
     'illustratorPrompt', 'autoIllustrate', 'imageCooldown', 'imageQuality', 'imageSize',
-    'maxResponders', 'contextMessages'];
-  const numericSettings = new Set(['imageCooldown', 'maxResponders', 'contextMessages']);
+    'maxResponders', 'contextTokenLimit'];
+  const numericSettings = new Set(['imageCooldown', 'maxResponders', 'contextTokenLimit']);
   const finishedImageStatuses = new Set(['completed', 'complete', 'done', 'failed', 'error',
     'cancelled', 'canceled', 'skipped', 'superseded', 'stale', 'invalidated']);
   const storage = {
@@ -365,6 +365,21 @@
     if (event.target.tagName === 'IMG' && state.nearBottom) scrollToBottom();
   }, true);
 
+  function narratorContextUsage(story = state.story) {
+    const usage=story?.contextUsage?.narrator;
+    if(!usage||usage.error||!Number.isInteger(usage.tokens)||usage.tokens<0||!Number.isInteger(usage.threshold)||usage.threshold<=0) {
+      const detail=usage?.error?` ${String(usage.error)}`:'';
+      return {text:'Context count unavailable',label:'Narrator context count unavailable',title:`The server has not provided a current narrator context estimate.${detail}`};
+    }
+    const tokens=usage.tokens.toLocaleString(),threshold=usage.threshold.toLocaleString();
+    return {text:`Narrator context ${usage.approximate===false?'':'~'}${tokens} / ${threshold} tokens`,label:`Narrator context: ${usage.approximate===false?'':'approximately '}${tokens} tokens; compaction threshold ${threshold} tokens.`,title:`${usage.approximate===false?'Counted':'Estimated'} with ${usage.encoding||'the server tokenizer'}. Each narrator and character compacts independently at the configured token threshold. Older records remain available for rewind.`};
+  }
+  function renderContextUsage() {
+    const usage=narratorContextUsage();
+    for(const id of ['context-status','inspector-context-status']) {
+      const field=$(id);field.textContent=usage.text;field.title=usage.title;field.setAttribute('aria-label',usage.label);
+    }
+  }
   function updateControls() {
     const story = state.story;
     const busy = Boolean(story?.busy || (state.operation?.generating && state.operation.id === story?.id));
@@ -388,6 +403,7 @@
       : `Illustration could not be completed: ${job.error || 'Check the proxy connection and try again from the gallery.'}`;
     $('save-status').textContent = state.selecting ? 'Opening story…' : state.operation ? 'Working…'
       : story?.busy ? 'Generating…' : story ? `Saved locally${dateLabel(story.updatedAt, true) ? ` · ${dateLabel(story.updatedAt, true)}` : ''}` : '';
+    renderContextUsage();
     updateMessageControls();
     if ($('branches-dialog').open) {
       $('branch-list').querySelectorAll('button').forEach((control) => { control.disabled = isLocked; });
@@ -695,6 +711,7 @@
     return card;
   }
   function renderInspector() {
+    renderContextUsage();
     const world = state.story?.world || {};
     const characters = world.characters || [];
     const summary = $('world-summary'); summary.replaceChildren();
@@ -1069,6 +1086,11 @@
       if(previousProxy!==state.settings.proxyBaseUrl)state.models=[];
       populateSettings(); toast('Settings saved. New generations use these prompts.');
       await checkModels();
+      const storyId=state.story?.id;
+      if(storyId) {
+        try {const story=await api(`/api/stories/${encodeURIComponent(storyId)}`);if(state.story?.id===storyId)applyStory(story);}
+        catch { /* The next story refresh will retrieve its updated context count. */ }
+      }
     } catch (error) { inlineError('settings-error', error); }
     finally {
       state.settingsLoading = false;
