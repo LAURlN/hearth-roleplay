@@ -130,7 +130,7 @@ function assertObservable(state, text, { authored = false, characterId } = {}) {
   }
 }
 function log(state, event) {
-  const entry = { ...clone(event), id: id(), time: event.time??state.time };
+  const entry = { ...clone(event), id: id(), time: state.time };
   state.events.push(entry);
   return entry;
 }

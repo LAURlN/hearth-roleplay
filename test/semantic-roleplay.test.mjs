@@ -164,3 +164,11 @@ test('authored-source permission does not let transformed helper text or labels 
     await assert.rejects(run(state,p,input),/Private player content/);assert.equal(state.events.length,0);
   }
 });
+
+test('an extra generated time field cannot override the engine clock or visual provenance',async()=>{
+  const state=world(),p=provider({plan:()=>({events:[{type:'observation',at:5,time:999,text:'Pat puts on a red coat.',location:'park path'}],text:'',speakers:[]}),visual:data=>({patches:data.sources.filter(s=>s.text==='Pat puts on a red coat.').map(s=>({characterId:'player',set:[{key:'coat',layer:'presentation',text:'red coat',visible:'red coat',sourceId:s.id,excerpt:s.text}],remove:[]}))})});
+  const result=await run(state,p),source=result.state.events.find(e=>e.type==='observation'&&e.text==='Pat puts on a red coat.');
+  const fact=result.state.characters[0].visual.facts.find(f=>f.key==='coat');
+  assert.equal(result.state.time,5);assert.equal(source.time,5);assert.equal(fact.time,5);assert.equal(fact.source.time,5);
+  const passage=result.messages.find(m=>m.sourceEventId===source.id);assert.equal(passage.storyTime,5);assert.equal(passage.snapshot.time,5);
+});
