@@ -123,6 +123,26 @@ Status: implemented as a local first version. Accepted requirements and the desi
 
 Proxy reference: https://github.com/EvanZhouDev/openai-oauth/blob/main/packages/core/src/images.ts.
 
+## Player passage presentation proposal
+
+The user proposes a separate helper assembling one coherent player passage after the independently controlled scene activity. The user confirmed that the combined passage should appear by default, with expandable original narrator and character contributions available for precise editing and deletion. Original message controls and their branch/rewind semantics remain required. The assembly pipeline, whole-passage editing behaviour and context-payload optimizations are under assessment; this records the agreed presentation preference, not an implemented feature.
+
+Assessment recommendation: retain canonical contributions and their inner checkpoints; store the combined passage as a separate presentation referring to those contributions and the completed response checkpoint. Give its helper only ordered player-visible deliveries, approved appearance descriptions and editorial prose, with safe attribution and source boundaries. Preserve spoken wording, observable actions and chronological order without adding motives, actions or facts. Never feed the combined passage back into world evidence, character knowledge or appearance extraction. Expanded contributions keep precise revision controls; whole-passage multi-speaker editing needs a separate reconciliation contract. Final response rewind should use its final checkpoint, while expanded originals keep their own boundaries. Illustrations retain canonical historical anchors.
+
+The presenter should replace the current environmental display-delta responsibility and remove the need to manufacture closing prose solely for a hidden-state checkpoint. Required perception/appearance work still runs; usually one additional serial text request remains. Character scheduling determines when to yield before presentation. Composition cannot repair a narrator plan that already crossed a player response opportunity. The combined passage remains a proposal, pending implementation agreement.
+
+### Context-payload audit, 2026-11-10
+
+Read-only audit at 01cab37 found mechanical optimizations that do not require shortening retained history or changing semantic decisions. All token measurements below use invented local fixtures and the existing local tokenizer, not private stories or live inference; savings are fixture-specific.
+
+- Semantic snapshots slice archived narrator events and reset the archive boundary. Later narrator projection cannot recognize character knowledge tied to the removed events, so perception/awareness requests can resend observations already represented in narrator continuity notes. Preserve historical source eligibility and archive metadata without slicing twice. A ten-person, forty-notice fixture sent 400 knowledge records (42581 tokens), versus the intended 100 unarchived records (10661 tokens). Originals and independent character memory must remain intact.
+- Model-facing event data repeats identical deliveries in event perceptions and perception-decision records, alongside per-character observations. Replacing only verified-identical decision deliveries with a source reference reduced one projected-world fixture from 173380 to 110620 tokens. Preserve distinct witness text, attribution, uncertainty and visual decisions; normalize counting and compaction source weights consistently.
+- Awareness candidates repeat whole publications once per recipient, despite a publication table already present. Referencing that table by ID reduced one thirty-recipient fixture payload from 45096 to 5316 tokens, retaining full source, audience, timing and expiry data once.
+- Automatic illustrator cooldown currently makes a decision request whose result cannot generate an image. Returning the same cooldown status earlier can save that request and reference-image reads, preserving manual bypass and valid historical anchors.
+- Smaller actor savings come from duplicated remembered-appearance representations. More general task-specific payloads should remove bookkeeping and exact duplication before considering semantic relevance cuts. Applicable custom roleplay instructions, source evidence and necessary perspective information remain required.
+
+The normal service narrator request matched its counted payload in the audit. Direct engine callers, schema-correction retries and growing backstage/closing requests need targeted counting/budget tests. Keep the existing independent 300000-token owner thresholds and oldest-two-thirds helper compaction; no arbitrary message-count cutoff or silent semantic history loss. The audit recommends context fixes before unified presentation. No behavior changes were made during this assessment.
+
 ## Long-story continuity
 
 - Original observations and events remain in saved checkpoints for inspection and rewind.

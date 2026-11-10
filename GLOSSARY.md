@@ -43,6 +43,9 @@ What a person can hear, see or otherwise notice at a particular moment. Two peop
 **Perceived event**:
 The portion of an event that a particular person notices, including indistinct sounds or an unidentified voice without unseen gestures or identity.
 
+**Player passage**:
+A coherent telling of the events and dialogue the player perceived during a response. Its wording is distinct from what happened and what each character knows.
+
 **Response opportunity**:
 A moment when a character or the player can naturally react to something they have perceived. An earlier planned conversation does not take priority over a new interruption.
 
