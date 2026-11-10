@@ -33,7 +33,11 @@ export class StoryService {
     this.store=store;this.makeProvider=makeProvider;this.busy=new Map();this.usageCache=new Map();this.illustrator=new Illustrator({store,makeProvider});
   }
   async view(id) {
-    const story=await this.store.get(id),settings=await this.store.settings(),branch=story.branches[story.activeBranchId];
+    const settings=await this.store.settings();
+    // Keep a lease observed during the history read: a turn may commit before
+    // this view returns, but old history must never be reported as settled.
+    const readingLease=this.busy.get(id);
+    const story=await this.store.get(id),branch=story.branches[story.activeBranchId];
     const key=JSON.stringify([story.version,story.activeBranchId,settings]);
     let cached=this.usageCache.get(id);
     if(cached?.key!==key){
@@ -42,7 +46,7 @@ export class StoryService {
       catch(error){usage={narrator:{error:error.message,threshold:settings.contextTokenLimit??300000}};}
       cached={key,usage};this.usageCache.set(id,cached);
     }
-    return {...publicStory(story,this.busy.get(id)),contextUsage:cached.usage};
+    return {...publicStory(story,readingLease??this.busy.get(id)),contextUsage:cached.usage};
   }
   async metadata(id,input) {
     this.ensureFree(id);

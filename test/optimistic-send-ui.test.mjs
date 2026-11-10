@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import {StoryService} from '../src/story-service.mjs';
+import {createSimpleState} from '../src/simple-engine.mjs';
+import {DEFAULT_SETTINGS} from '../src/settings.mjs';
 
 const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
 const defer = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
@@ -126,6 +129,32 @@ test('network uncertainty blocks duplicate retry, then canonical recovery clears
   assert.equal(c.context.locked(), true); assert.match(c.pending()[0].children[0].children[1].textContent, /Checking delivery/);
   await c.submit('Uncertain action'); assert.equal(requests, 1);
   online = true; await c.poll(); assert.equal(c.pending().length, 0); assert.equal(c.player().length, 1); assert.equal(c.context.locked(), false);
+});
+
+for(const delayed of ['settings','history'])test(`a commit during a ${delayed} read cannot restore an already saved submission into the composer`, async () => {
+  const base=story(),world=createSimpleState({title:'Status test',premise:'A quiet room.',persona:{name:'Pat'}});
+  let saved={...base,setup:{mode:'simple'},branches:{main:{id:'main',name:'Main',initialState:world,messages:base.branch.messages.map(m=>({...m,snapshot:structuredClone(world)})),illustrations:[]}}};
+  const entered=defer(),release=defer(),request=defer();let online=false,delaySettings=delayed==='settings',delayHistory=delayed==='history';
+  const service=new StoryService({get:async()=>{
+    const snapshot=structuredClone(saved);if(delayHistory){entered.resolve();await release.promise;}return snapshot;
+  },settings:async()=>{
+    if(delaySettings){entered.resolve();await release.promise;}return {...DEFAULT_SETTINGS};
+  }});
+  service.busy.set('story',{controller:new AbortController(),stage:'Narrating'});
+  const c=controller(async (_path,options)=>{
+    if(options?.method==='POST')return request.promise;
+    if(!online)throw new Error('Offline');return service.view('story');
+  });
+  const sending=c.submit('A saved action');request.reject(new Error('Offline'));await sending;
+  assert.equal(c.context.locked(),true);
+  online=true;const reading=c.poll();await entered.promise;
+  saved.version++;
+  saved.branches.main.messages.push({id:'player-new',role:'player',speaker:'Pat',text:'A saved action',snapshot:structuredClone(world)});
+  service.busy.delete('story');delaySettings=false;delayHistory=false;release.resolve();await reading;
+  assert.equal(c.field('composer').value,'','status reconciliation must not restore text from a committed turn');
+  assert.ok(c.state.submissions.story.every(item=>item.status!=='failed'));
+  if(c.pending().length)await c.poll();
+  assert.equal(c.pending().length,0);assert.equal(c.player().length,1);assert.equal(c.field('composer').value,'');
 });
 
 test('reconnect uses persisted boundary and isolates submissions across stories, branches and stale versions', async () => {

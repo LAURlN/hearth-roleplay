@@ -149,3 +149,22 @@ test('Simple illustrator uses observable history and authored descriptions, excl
   const deadline=Date.now()+5000;while(f.service.illustrator.jobs.has(story.id)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
   const viewed=await f.service.view(story.id);assert.equal(viewed.illustrationJob.status,'completed',viewed.illustrationJob.error);assert.equal(f.images.length,1);assert.equal(viewed.branch.illustrations[0].anchorMessageId,story.branch.messages.at(-1).id);
 });
+
+test('Simple illustrator retains off-metadata character profiles when newer plain prose establishes their presence',async t=>{
+  const f=await fixture(t);
+  let story=await f.service.create({...setup,characters:[...setup.characters,{name:'Bran',location:'The tavern',description:'A tall person with copper hair.',appearance:'Copper hair and a blue apron.'}]});
+  const bran=story.world.characters.find(c=>c.name==='Bran');
+  f.fake.respond=()=> 'You enter the tavern. Bran, in his blue apron, sets a bowl on the counter.';
+  story=await f.service.turn(story.id,story.version,'I enter the tavern.');
+  assert.equal(story.world.location,'The inn');assert.equal(bran.location,'The tavern');
+  f.fake.respond=request=>{
+    const data=JSON.parse(request.messages[1].content[0].text),profile=data.characters.find(c=>c.id===bran.id);
+    assert.equal(profile?.description,'A tall person with copper hair.');
+    assert.ok(data.publicHistory.some(m=>m.text.includes('Bran, in his blue apron')));
+    return JSON.stringify({generate:true,prompt:'Bran serves a bowl in the tavern.',caption:'At the tavern',characterIds:[bran.id,'unknown'],referenceIds:[]});
+  };
+  await f.service.illustrate(story.id,{expectedVersion:story.version});
+  const deadline=Date.now()+5000;while(f.service.illustrator.jobs.has(story.id)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+  const viewed=await f.service.view(story.id);assert.equal(viewed.illustrationJob.status,'completed',viewed.illustrationJob.error);
+  assert.deepEqual(viewed.branch.illustrations.at(-1).characterIds,[bran.id]);
+});
