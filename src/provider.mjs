@@ -4,6 +4,37 @@ export class ProviderError extends Error {
   constructor(message, status = 502, code = 'PROXY_ERROR') { super(message); this.status = status; this.code = code; }
 }
 
+function visionRequest(model,messages) {
+  const instructions=[];const input=[];
+  for(const message of messages) {
+    const parts=typeof message.content==='string'?[{type:'text',text:message.content}]:message.content;
+    if(!Array.isArray(parts))throw new ProviderError('Invalid visual conversation content.',400);
+    if(message.role==='system'||message.role==='developer') {
+      if(parts.some(part=>part.type!=='text'))throw new ProviderError('Visual references belong in a user message.',400);
+      instructions.push(parts.map(part=>part.text).join(''));continue;
+    }
+    if(!['user','assistant'].includes(message.role))throw new ProviderError('Unsupported visual conversation role.',400);
+    const content=parts.map(part=>{
+      if(part.type==='text'&&typeof part.text==='string')return {type:message.role==='assistant'?'output_text':'input_text',text:part.text};
+      if(message.role==='user'&&part.type==='image_url'&&typeof part.image_url?.url==='string')return {type:'input_image',image_url:part.image_url.url,...(part.image_url.detail?{detail:part.image_url.detail}:{})};
+      throw new ProviderError('Unsupported visual conversation content.',400);
+    });
+    input.push({role:message.role,content});
+  }
+  return {model,instructions:instructions.join('\n\n'),input,store:false,stream:false};
+}
+
+function visionText(result) {
+  if(result.status==='failed'||result.error)throw new ProviderError(result.error?.message||'The visual model request failed.');
+  if(result.status==='incomplete')throw new ProviderError('The model response was incomplete. Retry the turn.');
+  const content=(Array.isArray(result.output)?result.output:[]).filter(item=>item?.type==='message').flatMap(item=>Array.isArray(item.content)?item.content:[]);
+  const refusal=content.find(part=>part?.type==='refusal');
+  if(refusal)throw new ProviderError(`The model declined this request: ${refusal.refusal||'Refused.'}`,422,'MODEL_REFUSAL');
+  const text=content.filter(part=>part?.type==='output_text'&&typeof part.text==='string').map(part=>part.text).join('');
+  if(!text.trim())throw new ProviderError('The model returned no usable visual response.');
+  return text;
+}
+
 export function createProvider(settings, fetchImpl = fetch) {
   const base = validateProxyUrl(settings.proxyBaseUrl);
   async function request(path, options = {}, limit = 24 * 1024 * 1024) {
@@ -35,6 +66,12 @@ export function createProvider(settings, fetchImpl = fetch) {
       return list.map(item => typeof item === 'string' ? {id:item,name:item} : {id:item.id ?? item.slug,name:item.display_name ?? item.name ?? item.id ?? item.slug}).filter(item=>item.id);
     },
     async complete({model=settings.chatModel,messages,signal}) {
+      // openai-oauth's chat adapter passes data: images through an SDK URL
+      // downloader. Its native Responses route preserves inline image bytes.
+      if(messages.some(message=>Array.isArray(message.content)&&message.content.some(part=>part?.type==='image_url'))) {
+        const result=await request('/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(visionRequest(model,messages)),signal},4*1024*1024);
+        return visionText(result);
+      }
       const result = await request('/chat/completions', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model,messages,stream:false}),signal}, 4 * 1024 * 1024);
       const choice = result.choices?.[0];
       if (choice?.message?.refusal || choice?.finish_reason === 'content_filter') throw new ProviderError(`The model declined this request: ${choice.message.refusal ?? 'Content filter refusal.'}`, 422, 'MODEL_REFUSAL');

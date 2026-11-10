@@ -43,3 +43,11 @@ Reviewer: Codex provider, gpt-6.1-sol on high reasoning effort. Round 1 verdict:
 Added regressions for a different library at the same port, a registry pointing at the wrong PID, and a stopped proxy taking the preferred port during startup. No findings declined. Live OAuth and Android interaction remain untested; subprocess and HTTP tests use local scripted proxies without subscription spending.
 
 Termux round 2 verdict: APPROVE. T1/T2 independently confirmed resolved, no related regressions found. Reviewer independently passed JavaScript and Bash syntax checks and all 63 tests, with no skips. Workflow diff after fixes: 341 insertions and 15 deletions across 10 files before this final documentation update. No findings declined; usage figures were not returned.
+
+## Inline image proxy compatibility
+
+Base: 1f35511a911ee648f91ed0a8175de0eb6ed9cd68. User reported `URL scheme must be http or https, got data:` while illustrating a story. Reproduced the exact error in a local HTTP regression before changing the provider.
+
+Image-containing text requests now use the same loopback subscription proxy's native `/responses` endpoint, preserving inline image bytes, instructions, supplied history, and model selection. Ordinary text chat and multipart image generation/edit calls keep their existing routes. Visual refusals, failed/incomplete results, and missing answers are surfaced without fallback or retry.
+
+Reviewer: Codex provider, gpt-6.1-sol on high reasoning effort. One round, verdict APPROVE, no actionable findings. Reviewer checked the scoped diff but did not rerun tests. Root ran JavaScript checks and all 66 tests successfully; the new regression failed before the fix and passed after it. One pre-existing background-job test timeout was isolated and its test helper given a real deadline and terminal-error diagnostics. Behavior/test diff: 85 insertions, 1 deletion across 3 files, before this documentation update. No findings declined; usage figures were not returned. No live OAuth or phone inference was used during verification.

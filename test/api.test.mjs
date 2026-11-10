@@ -51,7 +51,8 @@ async function fixture(t) {
 }
 const route=story=>`/api/stories/${story.id}`;
 async function until(operation,predicate) {
-  for(let i=0;i<100;i++){const value=await operation();if(predicate(value))return value;await new Promise(resolve=>setTimeout(resolve,5));}
+  const deadline=Date.now()+10000;
+  while(Date.now()<deadline){const value=await operation();if(predicate(value))return value;if(value?.illustrationJob?.status==='failed')throw new Error('Background image failed: '+value.illustrationJob.error);await new Promise(resolve=>setTimeout(resolve,10));}
   throw new Error('Background job did not settle.');
 }
 
